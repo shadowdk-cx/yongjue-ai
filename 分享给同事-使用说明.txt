@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>涌觉商贸AI图文视频制作工具 - 使用说明</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 24px 20px;
+      line-height: 1.6;
+      color: #1e293b;
+      background: #f8fafc;
+    }
+    h1 {
+      font-size: 1.35rem;
+      color: #0f172a;
+      margin-bottom: 8px;
+    }
+    .subtitle { color: #64748b; font-size: 0.9rem; margin-bottom: 24px; }
+    section {
+      background: #fff;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }
+    section h2 {
+      font-size: 1rem;
+      margin: 0 0 12px 0;
+      color: #0f172a;
+    }
+    section p { margin: 0 0 10px 0; color: #475569; font-size: 0.9rem; }
+    section p:last-child { margin-bottom: 0; }
+    a {
+      color: #0284c7;
+      text-decoration: none;
+    }
+    a:hover { text-decoration: underline; }
+    .link-box {
+      background: #e0f2fe;
+      border: 1px solid #7dd3fc;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-top: 12px;
+      word-break: break-all;
+    }
+    .link-box strong { display: block; margin-bottom: 6px; font-size: 0.85rem; color: #0369a1; }
+    .link-box a { font-size: 1rem; }
+    .steps { margin: 0; padding-left: 20px; color: #475569; font-size: 0.9rem; }
+    .steps li { margin-bottom: 6px; }
+    .note { font-size: 0.85rem; color: #64748b; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>涌觉商贸AI图文视频制作工具</h1>
+  <p class="subtitle">产品解析、SEO 文案、生图、图生视频/文生视频，一键生成</p>
+
+  <section>
+    <h2>如何使用（同事必读）</h2>
+    <p>本工具是网页应用，用浏览器打开<strong>使用链接</strong>即可，无需安装。</p>
+    <p><strong>使用链接：</strong></p>
+    <div class="link-box">
+      <strong>请向分享此文件给你的同事索取当前使用链接</strong>
+      <a href="#" id="app-link">（链接由管理员填写后即可点击打开）</a>
+    </div>
+    <p class="note">管理员可将上面「使用链接」改为实际地址（如公司内网地址或已部署的 Vercel 链接），同事打开本 HTML 后直接点击即可。</p>
+  </section>
+
+  <section>
+    <h2>首次使用准备</h2>
+    <ul class="steps">
+      <li>用 Chrome / Edge 等浏览器打开上面链接</li>
+      <li>在页面顶部<strong>配置栏</strong>填入自己的 <strong>Gemini API Key</strong>（<a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio 获取</a>）</li>
+      <li>选择需要的模型后，在「图文工作区」「图像生成」「视频生成」中即可使用</li>
+    </ul>
+    <p class="note">API Key 仅保存在你当前浏览器，不会上传到服务器；每人填自己的 Key，按量计费。</p>
+  </section>
+
+  <section>
+    <h2>管理员：如何提供使用链接</h2>
+    <p><strong>方式一（内网共用）</strong>：在本机项目目录执行 <code>npm run dev:share</code>，把终端里本机 IP 的地址（如 <code>http://192.168.x.x:3000</code>）发给同事。</p>
+    <p><strong>方式二（公网链接）</strong>：将项目部署到 Vercel，把生成的 <code>https://xxx.vercel.app</code> 链接发给同事。部署步骤见项目内「部署到Vercel拿到链接.md」。</p>
+    <p>把链接填到本 HTML 的「使用链接」处，同事打开本文件即可点击访问。</p>
+  </section>
+
+  <script>
+    // 管理员填写实际使用链接后，同事点击即可打开
+    (function() {
+      var link = document.getElementById('app-link');
+      var url = '#'; // 请把这里改成实际链接，例如 'http://192.168.1.100:3000' 或 'https://你的项目.vercel.app'
+      if (url && url !== '#') {
+        link.href = url;
+        link.textContent = url;
+      } else {
+        link.href = '#';
+        link.textContent = '（请向管理员索取使用链接）';
+      }
+    })();
+  </script>
+</body>
+</html>

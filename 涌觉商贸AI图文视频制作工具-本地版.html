@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>涌觉商贸AI图文视频制作工具（本地版）</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #f1f5f9; color: #1e293b; }
+    .app { max-width: 1200px; margin: 0 auto; padding: 12px; min-height: 100vh; display: flex; flex-direction: column; }
+    header { background: #fff; border-radius: 10px; padding: 12px 16px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    header h1 { margin: 0; font-size: 1.1rem; }
+    .tabs { display: flex; gap: 4px; }
+    .tabs button { padding: 8px 14px; border: none; border-radius: 8px; background: #e2e8f0; color: #475569; cursor: pointer; font-size: 0.9rem; }
+    .tabs button.active { background: #0ea5e9; color: #fff; }
+    .config { background: #e2e8f0; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 0.85rem; }
+    .config label { font-weight: 500; }
+    .config input[type=password] { width: 220px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; }
+    .config select { padding: 6px 10px; border-radius: 6px; border: 1px solid #cbd5e1; }
+    .panel { display: none; background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); flex: 1; }
+    .panel.show { display: block; }
+    .panel h2 { margin: 0 0 12px 0; font-size: 1rem; }
+    textarea { width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 0.9rem; resize: vertical; min-height: 80px; }
+    .row { margin-bottom: 12px; }
+    .row label { display: block; margin-bottom: 4px; font-size: 0.85rem; color: #64748b; }
+    button.primary { background: #0ea5e9; color: #fff; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 0.9rem; }
+    button.primary:disabled { opacity: 0.6; cursor: not-allowed; }
+    .error { color: #dc2626; font-size: 0.85rem; margin-top: 6px; }
+    .out { margin-top: 12px; padding: 12px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; white-space: pre-wrap; font-size: 0.9rem; }
+    .img-out { margin-top: 12px; }
+    .img-out img { max-width: 100%; max-height: 400px; border-radius: 8px; border: 1px solid #e2e8f0; }
+    .loading { color: #64748b; font-size: 0.9rem; }
+    .video-tip { padding: 24px; text-align: center; color: #64748b; background: #f8fafc; border-radius: 8px; }
+    .full-version-tip { background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 0.85rem; line-height: 1.6; }
+    .full-version-tip code { background: #fff; padding: 2px 6px; border-radius: 4px; }
+    .full-version-tip a { color: #b45309; font-weight: 600; }
+    .file-wrap { margin-top: 8px; }
+    .file-wrap input[type=file] { font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>涌觉商贸AI图文视频制作工具（本地版）</h1>
+      <div class="tabs">
+        <button type="button" class="tab active" data-tab="text">图文工作区</button>
+        <button type="button" class="tab" data-tab="image">图像生成</button>
+        <button type="button" class="tab" data-tab="video">视频生成</button>
+      </div>
+    </header>
+
+    <div class="full-version-tip">
+      <strong>界面不一样 / 无法生图？</strong> 本页是精简版。直接双击打开时，浏览器会限制对外网请求，<strong>生图通常无法使用</strong>。要使用和您电脑上一样的完整界面并正常生图，请用<strong>完整版</strong>：<br>
+      1）在本工具所在文件夹打开终端（或 Cursor 终端）；<br>
+      2）执行 <code>npm run dev</code>；<br>
+      3）浏览器打开 <a href="http://localhost:3000" target="_blank">http://localhost:3000</a>。<br>
+      完整版包含：产品主图垫图、生成记录、按数量/批量生成、视频生成等，界面与功能一致。
+    </div>
+    <div class="config">
+      <label>Gemini API Key</label>
+      <input type="password" id="apiKey" placeholder="AIza...">
+      <label>生文模型</label>
+      <select id="textModel">
+        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+        <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+      </select>
+      <label>生图模型</label>
+      <select id="imageModel">
+        <option value="gemini-2.5-flash-image">Nano Banana</option>
+        <option value="gemini-3.1-flash-image-preview">Nano Banana 2</option>
+        <option value="gemini-3-pro-image-preview">Nano Banana Pro</option>
+      </select>
+    </div>
+
+    <!-- 图文工作区 -->
+    <section id="panel-text" class="panel show">
+      <h2>产品信息</h2>
+      <div class="row">
+        <textarea id="productInfo" placeholder="粘贴产品标题、卖点、描述等..."></textarea>
+      </div>
+      <div class="row">
+        <label>平台</label>
+        <select id="platform"><option value="amazon">亚马逊</option><option value="standalone">独立站</option></select>
+        <label style="margin-left:12px">语言</label>
+        <select id="language"><option value="en">英文</option><option value="zh">中文</option></select>
+      </div>
+      <button type="button" class="primary" id="btnCopy">生成标题+卖点+详情</button>
+      <div id="copyError" class="error"></div>
+      <div id="copyOut" class="out" style="display:none;"></div>
+    </section>
+
+    <!-- 图像生成 -->
+    <section id="panel-image" class="panel">
+      <h2>生图提示词 / 产品信息</h2>
+      <div class="row">
+        <textarea id="imagePrompt" placeholder="输入产品描述或生图提示词，也可先填产品信息再点「生成提示词」"></textarea>
+      </div>
+      <div class="row">
+        <label>垫图（可选）</label>
+        <div class="file-wrap"><input type="file" id="baseImage" accept="image/*"></div>
+      </div>
+      <button type="button" class="primary" id="btnGenPrompt">根据上方内容生成提示词</button>
+      <button type="button" class="primary" id="btnGenImage" style="margin-left:8px">生成 1 张图</button>
+      <div id="imageError" class="error"></div>
+      <div id="imageLoading" class="loading" style="display:none;">正在生成...</div>
+      <div id="imageOut" class="img-out" style="display:none;"></div>
+    </section>
+
+    <!-- 视频生成 -->
+    <section id="panel-video" class="panel">
+      <div class="video-tip">
+        <p><strong>视频生成</strong>需要后端长时间轮询，本地 HTML 版暂不支持。</p>
+        <p>请使用完整版：在项目目录运行 <code>npm run dev</code>，浏览器打开 http://localhost:3000 即可使用图生视频/文生视频。</p>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    (function() {
+      var GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+      var apiKeyEl = document.getElementById('apiKey');
+      var textModelEl = document.getElementById('textModel');
+      var imageModelEl = document.getElementById('imageModel');
+      var productInfoEl = document.getElementById('productInfo');
+      var platformEl = document.getElementById('platform');
+      var languageEl = document.getElementById('language');
+      var imagePromptEl = document.getElementById('imagePrompt');
+      var baseImageEl = document.getElementById('baseImage');
+
+      // 从 localStorage 恢复
+      try {
+        if (localStorage.getItem('gemini_api_key')) apiKeyEl.value = localStorage.getItem('gemini_api_key');
+      } catch (_) {}
+      apiKeyEl.addEventListener('change', function() { try { localStorage.setItem('gemini_api_key', apiKeyEl.value); } catch(_) {} });
+
+      function getKey() { return (apiKeyEl.value || '').trim(); }
+
+      // 标签切换
+      document.querySelectorAll('.tab').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          document.querySelectorAll('.tab').forEach(function(b) { b.classList.remove('active'); });
+          document.querySelectorAll('.panel').forEach(function(p) { p.classList.remove('show'); });
+          btn.classList.add('active');
+          document.getElementById('panel-' + btn.dataset.tab').classList.add('show');
+        });
+      });
+
+      function geminiGenerateContent(model, contents, config) {
+        var key = getKey();
+        if (!key) return Promise.reject(new Error('请先填写 Gemini API Key'));
+        var url = GEMINI_BASE + '/' + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(key);
+        var body = { contents: contents };
+        if (config) body.generationConfig = config;
+        return fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        }).then(function(r) {
+          if (!r.ok) return r.json().then(function(e) { throw new Error(e.error && e.error.message ? e.error.message : '请求失败'); });
+          return r.json();
+        });
+      }
+
+      // 图文：生成标题+卖点+详情
+      document.getElementById('btnCopy').addEventListener('click', function() {
+        var errEl = document.getElementById('copyError');
+        var outEl = document.getElementById('copyOut');
+        errEl.textContent = '';
+        outEl.style.display = 'none';
+        var text = (productInfoEl.value || '').trim();
+        if (!text) { errEl.textContent = '请先填写产品信息'; return; }
+        var platform = platformEl.value;
+        var lang = languageEl.value;
+        var isZh = lang === 'zh';
+        var prompt = isZh
+          ? '根据以下产品信息，生成：1）符合国内电商/抖音或亚马逊中文站的产品标题（包含核心关键词、卖点，简洁无违禁词）；2）3-5条卖点；3）一段产品详情描述（用途、规格、材质、适用人群与使用场景）。请用分隔符分开三部分：---标题---、---卖点---、---详情---。全文使用简体中文。\n\n产品信息：\n' + text
+          : 'You are an e-commerce SEO expert. Based on the product information below, generate: 1) A product title (80-200 chars, keywords, no prohibited claims); 2) 3-5 bullet points; 3) A product description (use, specs, material, audience). Separate with: ---Title---, ---Bullets---, ---Description---. Use English.\n\nProduct info:\n' + text;
+        this.disabled = true;
+        var self = this;
+        geminiGenerateContent(textModelEl.value, [{ role: 'user', parts: [{ text: prompt }] }])
+          .then(function(res) {
+            var t = (res.candidates && res.candidates[0] && res.candidates[0].content && res.candidates[0].content.parts && res.candidates[0].content.parts[0] && res.candidates[0].content.parts[0].text) ? res.candidates[0].content.parts[0].text : '';
+            outEl.textContent = t || '(无输出)';
+            outEl.style.display = 'block';
+          })
+          .catch(function(e) {
+            errEl.textContent = e.message || '生成失败';
+          })
+          .then(function() { self.disabled = false; });
+      });
+
+      // 图像：生成提示词
+      document.getElementById('btnGenPrompt').addEventListener('click', function() {
+        var text = (imagePromptEl.value || '').trim();
+        if (!text) { document.getElementById('imageError').textContent = '请先输入产品描述或提示词'; return; }
+        var isZh = true;
+        var prompt = isZh ? '你是电商产品图生图提示词专家。请根据以下内容，用简体中文写一条详细的生图提示词：白底或简约背景、专业光影、产品主体清晰。只输出一条提示词。\n\n' + text : 'Write one detailed image generation prompt in English for a high-quality product image: white or minimal background, professional lighting. Only output the prompt.\n\n' + text;
+        this.disabled = true;
+        var self = this;
+        document.getElementById('imageError').textContent = '';
+        geminiGenerateContent(textModelEl.value, [{ role: 'user', parts: [{ text: prompt }] }])
+          .then(function(res) {
+            var t = (res.candidates && res.candidates[0] && res.candidates[0].content && res.candidates[0].content.parts && res.candidates[0].content.parts[0] && res.candidates[0].content.parts[0].text) ? res.candidates[0].content.parts[0].text.trim() : '';
+            if (t) imagePromptEl.value = t;
+          })
+          .catch(function(e) { document.getElementById('imageError').textContent = e.message || '生成失败'; })
+          .then(function() { self.disabled = false; });
+      });
+
+      // 垫图 -> base64
+      var baseImageData = null;
+      baseImageEl.addEventListener('change', function() {
+        var f = this.files && this.files[0];
+        baseImageData = null;
+        if (!f) return;
+        var reader = new FileReader();
+        reader.onload = function() { baseImageData = reader.result; };
+        reader.readAsDataURL(f);
+      });
+
+      // 图像：生成 1 张图
+      document.getElementById('btnGenImage').addEventListener('click', function() {
+        var key = getKey();
+        if (!key) { document.getElementById('imageError').textContent = '请先填写 Gemini API Key'; return; }
+        var prompt = (imagePromptEl.value || '').trim();
+        if (!prompt) { document.getElementById('imageError').textContent = '请先输入生图提示词'; return; }
+        var errEl = document.getElementById('imageError');
+        var loadEl = document.getElementById('imageLoading');
+        var outEl = document.getElementById('imageOut');
+        errEl.textContent = '';
+        outEl.style.display = 'none';
+        loadEl.style.display = 'block';
+        this.disabled = true;
+        var self = this;
+
+        var parts = [{ text: prompt }];
+        if (baseImageData && baseImageData.indexOf('data:image') === 0) {
+          var m = baseImageData.match(/^data:(image\/[a-z+]+);base64,(.+)$/i);
+          if (m) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+        }
+
+        var model = imageModelEl.value;
+        var body = {
+          contents: [{ role: 'user', parts: parts }],
+          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
+        };
+        var url = GEMINI_BASE + '/' + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(key);
+
+        fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+          .then(function(r) {
+            if (!r.ok) return r.json().then(function(e) { throw new Error(e.error && e.error.message ? e.error.message : '生图失败'); });
+            return r.json();
+          })
+          .then(function(res) {
+            loadEl.style.display = 'none';
+            var parts = res.candidates && res.candidates[0] && res.candidates[0].content && res.candidates[0].content.parts ? res.candidates[0].content.parts : [];
+            for (var i = 0; i < parts.length; i++) {
+              if (parts[i].inlineData && parts[i].inlineData.data) {
+                var mime = parts[i].inlineData.mimeType || 'image/png';
+                var data = parts[i].inlineData.data;
+                outEl.innerHTML = '<img src="data:' + mime + ';base64,' + data + '" alt="生成图">';
+                outEl.style.display = 'block';
+                return;
+              }
+            }
+            throw new Error('未返回图片');
+          })
+          .catch(function(e) {
+            loadEl.style.display = 'none';
+            var msg = e.message || '生图失败';
+            if (msg.indexOf('fetch') !== -1 || msg.indexOf('Network') !== -1 || msg.indexOf('Failed') !== -1 || msg.indexOf('跨域') !== -1) {
+              msg = '当前为直接打开的本文件，浏览器限制了对外网请求，无法生图。请改用完整版：在本项目目录运行 npm run dev，再打开 http://localhost:3000 即可使用与您电脑上一致的界面并正常生图。';
+            }
+            errEl.textContent = msg;
+          })
+          .then(function() { self.disabled = false; });
+      });
+    })();
+  </script>
+</body>
+</html>
