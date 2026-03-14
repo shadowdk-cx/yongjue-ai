@@ -34,15 +34,14 @@ export async function POST(req: NextRequest) {
     const sizeOption = SIZE_MAP[size] || '1024x1024';
     if (model?.startsWith('dall-e')) {
       const imageModel = model === 'dall-e-2' ? 'dall-e-2' : 'dall-e-3';
-      const opts: Parameters<typeof openai.images.create>[0] = {
+      const res = await openai.images.generate({
         model: imageModel,
         prompt,
         n: 1,
         size: imageModel === 'dall-e-3' ? sizeOption : '1024x1024',
         response_format: 'url',
         quality: 'standard',
-      };
-      const res = await openai.images.create(opts as never);
+      });
       const data = res.data?.[0];
       const url = data?.url;
       if (!url) return NextResponse.json({ error: '未返回图片' }, { status: 500 });
