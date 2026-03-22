@@ -113,6 +113,31 @@ export async function generateImagePromptFromImagesGemini(
   return (response.text ?? '').trim();
 }
 
+/** 根据“生成后的图片”（场景图/风格图）提取可复用的场景生图提示词。 */
+export async function extractScenePromptFromImageGemini(
+  ai: GoogleGenAI,
+  model: string,
+  imageDataUrl: string,
+  language: 'en' | 'zh' = 'zh'
+): Promise<string> {
+  const parsed = parseDataUrl(imageDataUrl);
+  if (!parsed) throw new Error('请提供有效的图片 dataURL');
+  const isZh = language === 'zh';
+  const textZh = `你是电商场景图提示词专家。请根据上方图片内容，提取并输出一条“可复用的场景生图提示词”（简体中文）。要求：
+1) 重点描述：背景/场景、光线、镜头/构图、色调、材质质感、氛围、道具与环境细节。
+2) 产品主体请用占位符表示：用「【产品主体】」代替具体产品，不要写死产品名称。
+3) 输出为一段完整提示词，便于直接用于再次生图；不要输出编号、不要输出分析过程、不要加引号或 markdown。`;
+  const textEn = `You are an expert at writing reusable scene prompts for e-commerce images. Based on the image above, output ONE reusable scene image-generation prompt in English.\nRequirements:\n- Focus on background/setting, lighting, camera/composition, color grading, materials/texture, mood, props and environmental details.\n- Replace the product with a placeholder \"[PRODUCT SUBJECT]\"; do not hardcode the actual product name.\n- Output only the prompt, no analysis, no bullets, no markdown.`;
+  const contents = [
+    { role: 'user' as const, parts: [{ text: isZh ? textZh : textEn }, { inlineData: parsed }] },
+  ];
+  const response = await ai.models.generateContent({
+    model: model || 'gemini-2.0-flash',
+    contents,
+  } as Parameters<GoogleGenAI['models']['generateContent']>[0]);
+  return (response.text ?? '').trim();
+}
+
 const FULLSET_FROM_IMAGES_EN = `Based on the product reference image(s) above, return ONLY a valid JSON object with exactly two keys:
 - "mainPrompts": array of exactly 5 strings. Each is a detailed prompt for a product MAIN image (white or minimal background, professional lighting, different angle or composition: e.g. front, 45°, side, top, lifestyle flatlay). Describe based on the product in the image(s).
 - "detailPrompts": array of exactly 5 strings. Each is a detailed prompt for a product DETAIL/section image (e.g. close-up texture, detail shot, usage scene, dimension reference, packaging or lifestyle).
@@ -195,6 +220,36 @@ export async function generateFullSetImagePromptsGemini(
   }
 }
 
+/**
+ * 基于「已有成品图」的精修指令，拼成发给 Gemini 图像模型的完整提示（图+文由 generateImageGemini 处理）。
+ */
+export function buildImageRefinePrompt(userInstruction: string, language: 'en' | 'zh'): string {
+  const t = userInstruction.trim();
+  if (!t) return '';
+  if (language === 'zh') {
+    return (
+      '这是一张已生成的电商营销图。请在尽量保持产品主体、品牌与卖点信息可读、整体构图不被破坏的前提下，按以下要求进行视觉精修（不要换成完全不同的另一件商品或另一张无关图）：\n\n' +
+      `【精修要求】\n${t}\n\n` +
+      '若要求涉及画面中中文文案：必须与用户给出的每个汉字完全一致，禁止形近错字。输出一张完整、清晰、可直接用于电商详情/主图的成品图。'
+    );
+  }
+  return (
+    'This is an existing e-commerce marketing image. Refine it visually while keeping the product identity, brand/selling text readable, and the overall layout intact (do not replace with a totally different product or unrelated image). Requirements:\n\n' +
+    `【Refinement】\n${t}\n\n` +
+    'Output one complete, sharp, ready-to-use e-commerce image.'
+  );
+}
+
+/** 含中文时追加说明：图像模型画字易错字，仅能尽量约束，无法从工具侧根治 */
+function appendChineseTypographyHint(prompt: string): string {
+  if (!/[\u4e00-\u9fff]/.test(prompt)) return prompt;
+  return (
+    `${prompt}\n\n` +
+    '【中文文字】若画面中需要显示中文，必须与上文用户给出的汉字、数字、标点逐字一致，禁止改成形近字、同音别字或乱码式汉字。' +
+    '若难以在图中稳定还原复杂中文，请优先保证产品与构图，文字区域用清晰易认的印刷体；仍无法保证时宁可留白也不要输出错误汉字。'
+  );
+}
+
 /** 解析 data URL 为 mimeType + base64 data */
 function parseDataUrl(dataUrl: string): { mimeType: string; data: string } | null {
   if (!dataUrl?.startsWith('data:')) return null;
@@ -211,22 +266,23 @@ export async function generateImageGemini(
   baseImage?: string | string[]
 ): Promise<string> {
   const imageModel = model || 'gemini-2.5-flash-image';
+  const promptForModel = appendChineseTypographyHint(prompt);
   const baseImages = Array.isArray(baseImage) ? baseImage : baseImage ? [baseImage] : [];
   const validImages = baseImages.filter((u): u is string => typeof u === 'string' && u.startsWith('data:')).map(parseDataUrl).filter(Boolean) as { mimeType: string; data: string }[];
 
-  let contents: unknown = prompt;
+  let contents: unknown = promptForModel;
   if (validImages.length === 1) {
     contents = [
       {
         role: 'user',
         parts: [
-          { text: prompt },
+          { text: promptForModel },
           { inlineData: validImages[0] },
         ],
       },
     ];
   } else if (validImages.length >= 2) {
-    const textPart = `以下是 ${validImages.length} 张参考图。请根据用户要求对它们进行对比、取舍或融合后生成新图（例如：保留某张的构图、某张的色调、或综合多张优点）。用户要求：\n\n${prompt}`;
+    const textPart = `以下是 ${validImages.length} 张参考图。请根据用户要求对它们进行对比、取舍或融合后生成新图（例如：保留某张的构图、某张的色调、或综合多张优点）。用户要求：\n\n${promptForModel}`;
     contents = [
       {
         role: 'user',

@@ -1,13 +1,23 @@
+import { withTimeout } from '@/lib/fetch-timeout';
+
 const RUNWAY_BASE = 'https://api.dev.runwayml.com/v1';
 const RUNWAY_VERSION = '2024-11-06';
+/** 单次 HTTP 无响应则失败，避免轮询永远挂起 */
+const RUNWAY_FETCH_TIMEOUT_MS = 90_000;
 
 async function runwayFetch(
   apiKey: string,
   path: string,
   options: RequestInit = {}
 ) {
+  const signal =
+    options.signal ??
+    (typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
+      ? AbortSignal.timeout(RUNWAY_FETCH_TIMEOUT_MS)
+      : undefined);
   const res = await fetch(`${RUNWAY_BASE}${path}`, {
     ...options,
+    signal,
     headers: {
       Authorization: `Bearer ${apiKey.trim()}`,
       'X-Runway-Version': RUNWAY_VERSION,
@@ -86,7 +96,11 @@ export async function waitForTaskOutput(
   const timeoutMs = options.timeoutMs ?? 180000;
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const task = await getTask(apiKey, taskId);
+    const task = await withTimeout(
+      getTask(apiKey, taskId),
+      RUNWAY_FETCH_TIMEOUT_MS,
+      '查询 Runway 任务状态超时，请稍后重试'
+    );
     if (task.status === 'SUCCEEDED') {
       const out = task.output;
       if (typeof out === 'string') return out;

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Loader2, Plus, Trash2, ZoomIn, Image as ImageIcon, Clock, ChevronDown, ChevronUp, X } from 'lucide-react';
+import { Loader2, Plus, Trash2, ZoomIn, Image as ImageIcon, Clock, ChevronDown, ChevronUp, X, Download, Square, Sparkles, Wand2 } from 'lucide-react';
 
 type ImageWorkflowProps = { apiKey: string; provider: 'gemini' | 'openai'; textModel?: string; imageModel: string };
 
@@ -19,6 +19,18 @@ type ImageRecord = {
 const IMAGE_HISTORY_KEY = 'ecom_ai_image_history';
 const MAX_IMAGE_HISTORY = 20;
 
+type StyleMemory = {
+  id: string;
+  name: string;
+  time: string;
+  promptText: string;
+  /** 生成图作为风格/场景参考（应用时会设为垫图，便于同风格生成其他产品） */
+  styleImages?: string[];
+};
+
+const STYLE_MEMORY_KEY = 'ecom_ai_style_memory';
+const MAX_STYLE_MEMORY = 30;
+
 function loadImageHistory(): ImageRecord[] {
   try {
     const raw = typeof window !== 'undefined' ? localStorage.getItem(IMAGE_HISTORY_KEY) : null;
@@ -29,6 +41,19 @@ function loadImageHistory(): ImageRecord[] {
 function saveImageHistory(items: ImageRecord[]) {
   try {
     localStorage.setItem(IMAGE_HISTORY_KEY, JSON.stringify(items.slice(0, MAX_IMAGE_HISTORY)));
+  } catch { /* ignore */ }
+}
+
+function loadStyleMemory(): StyleMemory[] {
+  try {
+    const raw = typeof window !== 'undefined' ? localStorage.getItem(STYLE_MEMORY_KEY) : null;
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveStyleMemory(items: StyleMemory[]) {
+  try {
+    localStorage.setItem(STYLE_MEMORY_KEY, JSON.stringify(items.slice(0, MAX_STYLE_MEMORY)));
   } catch { /* ignore */ }
 }
 
@@ -49,15 +74,229 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
   const [loadingPrompt, setLoadingPrompt] = useState(false);
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [scenePromptLoading, setScenePromptLoading] = useState(false);
   const [imageHistory, setImageHistory] = useState<ImageRecord[]>([]);
   const [showImageHistory, setShowImageHistory] = useState(false);
   const [zoomImageUrl, setZoomImageUrl] = useState<string | null>(null);
+  const [styleMemories, setStyleMemories] = useState<StyleMemory[]>([]);
+  const [styleName, setStyleName] = useState('');
+  const [styleNotice, setStyleNotice] = useState<string | null>(null);
+  /** 精修：选中的原图 + 用户说明 */
+  const [refineSourceUrl, setRefineSourceUrl] = useState<string | null>(null);
+  const [refineInstruction, setRefineInstruction] = useState('');
+  const [refineLoading, setRefineLoading] = useState(false);
   const [batchSourceImages, setBatchSourceImages] = useState<string[]>([]);
   const [batchGeneratedImages, setBatchGeneratedImages] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const batchFileInputRef = useRef<HTMLInputElement>(null);
+  const refineFileInputRef = useRef<HTMLInputElement>(null);
+  const baseSectionRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const abortRequestedRef = useRef(false);
 
-  useEffect(() => { setImageHistory(loadImageHistory()); }, []);
+  const toDataUrl = useCallback(async (url: string): Promise<string> => {
+    if (url.startsWith('data:')) return url;
+    const res = await fetch(url);
+    const blob = await res.blob();
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('读取图片失败'));
+      reader.readAsDataURL(blob);
+    });
+  }, []);
+
+  const extractScenePrompt = useCallback(async (imgUrl: string) => {
+    if (!apiKey) {
+      setError('请先填写 Gemini API Key');
+      return;
+    }
+    if (provider !== 'gemini') {
+      setError('提取图片场景提示词仅支持 Gemini，请先在配置栏切换为 Gemini');
+      return;
+    }
+    setError(null);
+    setScenePromptLoading(true);
+    try {
+      const imageDataUrl = await toDataUrl(imgUrl);
+      const res = await fetch('/api/image/scene-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey,
+          model: textModel || 'gemini-2.0-flash',
+          imageDataUrl,
+          language: promptLanguage,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '提取失败');
+      const prompt = String(data.prompt || '').trim();
+      if (!prompt) throw new Error('未返回提示词');
+      setImagePrompt(prompt);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '提取失败');
+    } finally {
+      setScenePromptLoading(false);
+    }
+  }, [apiKey, provider, textModel, promptLanguage, toDataUrl]);
+
+  /** 基于当前生成图调用 Gemini 做精修，结果插入「单张生成」列表最前 */
+  const runImageRefine = useCallback(async () => {
+    if (!refineSourceUrl) {
+      setError('请先点击某张图上的「精修」设为原图，或在大图预览里点「带入精修」');
+      return;
+    }
+    if (!refineInstruction.trim()) {
+      setError('请填写精修说明（例如：提亮、去背景杂物、加强文字清晰度等）');
+      return;
+    }
+    if (provider !== 'gemini') {
+      setError('图片精修需使用 Gemini：请在顶部配置栏将「服务商」选为 Gemini');
+      return;
+    }
+    if (!apiKey) {
+      setError('请先填写 API Key');
+      return;
+    }
+    setError(null);
+    setRefineLoading(true);
+    try {
+      const imageDataUrl = await toDataUrl(refineSourceUrl);
+      const res = await fetch('/api/image/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey,
+          provider: 'gemini',
+          model: imageModel,
+          mode: 'refine',
+          refineInstruction: refineInstruction.trim(),
+          promptLanguage,
+          baseImage: imageDataUrl,
+          size,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '精修失败');
+      const url = typeof data.url === 'string' ? data.url : '';
+      if (!url) throw new Error('未返回图片');
+      setGeneratedImages((prev) => [url, ...prev]);
+      setSelectedGenerated(0);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '精修失败');
+    } finally {
+      setRefineLoading(false);
+    }
+  }, [
+    refineSourceUrl,
+    refineInstruction,
+    provider,
+    apiKey,
+    imageModel,
+    promptLanguage,
+    size,
+    toDataUrl,
+  ]);
+
+  /** 用户点击停止：中止当前生成 */
+  const stopGenerating = useCallback(() => {
+    abortRequestedRef.current = true;
+    abortControllerRef.current?.abort();
+  }, []);
+
+  /** 一键保存图片到本地 */
+  const downloadImage = useCallback((url: string, defaultName = 'image.png') => {
+    if (!url) return;
+    const hasExt = /\.(png|jpe?g|gif|webp)$/i.test(defaultName);
+    const name = defaultName.replace(/[^\w\u4e00-\u9fa5\-.]/g, '_') + (hasExt ? '' : '.png');
+    if (url.startsWith('data:')) {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      return;
+    }
+    fetch(url, { mode: 'cors' })
+      .then((res) => res.blob())
+      .then((blob) => {
+        const u = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = u;
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(u);
+      })
+      .catch(() => {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.click();
+      });
+  }, []);
+
+  useEffect(() => {
+    setImageHistory(loadImageHistory());
+    setStyleMemories(loadStyleMemory());
+  }, []);
+
+  /** 收集当前已生成的图片作为风格参考（最多 3 张，避免 localStorage 过大） */
+  const getCurrentGeneratedImages = useCallback(() => {
+    const all: string[] = [
+      ...mainGeneratedImages,
+      ...detailGeneratedImages,
+      ...generatedImages,
+      ...countGeneratedImages,
+      ...batchGeneratedImages,
+    ];
+    return all.slice(0, 3);
+  }, [mainGeneratedImages, detailGeneratedImages, generatedImages, countGeneratedImages, batchGeneratedImages]);
+
+  const addStyleMemory = useCallback(() => {
+    const promptText = imagePrompt.trim();
+    if (!promptText) {
+      setError('请先生成或输入生图提示词，再保存为同风格场景记忆');
+      return;
+    }
+    const styleImages = getCurrentGeneratedImages();
+    const name = styleName.trim() || `风格记忆 ${new Date().toLocaleDateString('zh-CN')}`;
+    const item: StyleMemory = {
+      id: Date.now().toString(),
+      name,
+      time: new Date().toLocaleString('zh-CN'),
+      promptText,
+      styleImages: styleImages.length > 0 ? styleImages : undefined,
+    };
+    setStyleMemories((prev) => {
+      const next = [item, ...prev].slice(0, MAX_STYLE_MEMORY);
+      saveStyleMemory(next);
+      return next;
+    });
+    setStyleName('');
+  }, [imagePrompt, styleName, getCurrentGeneratedImages]);
+
+  const applyStyleMemory = useCallback((m: StyleMemory) => {
+    setImagePrompt(m.promptText);
+    setBaseImages(m.styleImages ?? []);
+    setError(null);
+    setStyleNotice(`已应用：${m.name}${m.styleImages?.length ? `（${m.styleImages.length} 张风格图）` : ''}`);
+    // 让用户直观看到风格图已加载到“垫图”
+    setTimeout(() => {
+      try { baseSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { /* ignore */ }
+    }, 0);
+    // 3 秒后自动隐藏提示
+    setTimeout(() => setStyleNotice(null), 3000);
+  }, []);
+
+  const removeStyleMemory = useCallback((id: string) => {
+    setStyleMemories((prev) => {
+      const next = prev.filter((x) => x.id !== id);
+      saveStyleMemory(next);
+      return next;
+    });
+  }, []);
 
   const addToImageHistory = useCallback((promptText: string, main: string[], detail: string[], single: string[]) => {
     const item: ImageRecord = {
@@ -153,10 +392,14 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
     }
     setError(null);
     setLoading(true);
+    abortRequestedRef.current = false;
+    abortControllerRef.current = new AbortController();
+    const { signal } = abortControllerRef.current;
     setBatchGeneratedImages([]);
     const urls: string[] = [];
     const total = batchSourceImages.length;
     for (let i = 0; i < total; i++) {
+      if (abortRequestedRef.current) break;
       setProgress({ current: i + 1, total, label: `批量 ${i + 1}/${total}` });
       try {
         const refs = [...baseImages, batchSourceImages[i]];
@@ -171,6 +414,7 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
             size,
             baseImages: refs.length > 0 ? refs : undefined,
           }),
+          signal,
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `第 ${i + 1} 张失败`);
@@ -180,15 +424,20 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           setBatchGeneratedImages((prev) => [...prev, url]);
         }
       } catch (e) {
+        if (abortRequestedRef.current || (e instanceof Error && e.name === 'AbortError')) break;
         setProgress(null);
         setError(e instanceof Error ? e.message : `批量第 ${i + 1} 张生成失败`);
         setLoading(false);
+        abortControllerRef.current = null;
         return;
       }
     }
     setProgress(null);
     setLoading(false);
-    addToImageHistory(prompt, [], [], urls);
+    abortControllerRef.current = null;
+    if (!abortRequestedRef.current && urls.length > 0) {
+      addToImageHistory(prompt, [], [], urls);
+    }
   };
 
   const generatePrompt = async (fullSet: boolean) => {
@@ -295,6 +544,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
     }
     setError(null);
     setLoading(true);
+    abortRequestedRef.current = false;
+    abortControllerRef.current = new AbortController();
+    const { signal } = abortControllerRef.current;
     try {
       const res = await fetch('/api/image/generate', {
         method: 'POST',
@@ -307,6 +559,7 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           size,
           baseImages: baseImages.length > 0 ? baseImages : undefined,
         }),
+        signal,
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || '生图失败');
@@ -316,9 +569,11 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
         addToImageHistory(imagePrompt, [], [], [url]);
       }
     } catch (e) {
+      if (abortRequestedRef.current || (e instanceof Error && e.name === 'AbortError')) return;
       setError(e instanceof Error ? e.message : '生图失败');
     } finally {
       setLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -330,6 +585,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
     }
     setError(null);
     setLoading(true);
+    abortRequestedRef.current = false;
+    abortControllerRef.current = new AbortController();
+    const { signal } = abortControllerRef.current;
     setMainGeneratedImages([]);
     setDetailGeneratedImages([]);
     const total = Math.min(list.length, 10);
@@ -337,6 +595,7 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
     const detailUrls: string[] = [];
 
     for (let i = 0; i < total; i++) {
+      if (abortRequestedRef.current) break;
       const label = i < 5 ? `主图 ${i + 1}` : `详情图 ${i - 4}`;
       setProgress({ current: i + 1, total, label });
       try {
@@ -351,6 +610,7 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
             size,
             baseImages: baseImages.length > 0 ? baseImages : undefined,
           }),
+          signal,
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `第 ${i + 1} 张失败`);
@@ -365,15 +625,20 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           }
         }
       } catch (e) {
+        if (abortRequestedRef.current || (e instanceof Error && e.name === 'AbortError')) break;
         setProgress(null);
         setError(e instanceof Error ? e.message : `第 ${i + 1} 张生成失败`);
         setLoading(false);
+        abortControllerRef.current = null;
         return;
       }
     }
     setProgress(null);
     setLoading(false);
-    addToImageHistory(imagePrompt, mainUrls, detailUrls, []);
+    abortControllerRef.current = null;
+    if (!abortRequestedRef.current && (mainUrls.length > 0 || detailUrls.length > 0)) {
+      addToImageHistory(imagePrompt, mainUrls, detailUrls, []);
+    }
   };
 
   const generateByCount = async () => {
@@ -385,9 +650,13 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
     }
     setError(null);
     setLoading(true);
+    abortRequestedRef.current = false;
+    abortControllerRef.current = new AbortController();
+    const { signal } = abortControllerRef.current;
     setCountGeneratedImages([]);
     const urls: string[] = [];
     for (let i = 0; i < count; i++) {
+      if (abortRequestedRef.current) break;
       setProgress({ current: i + 1, total: count, label: `第 ${i + 1} 张` });
       try {
         const res = await fetch('/api/image/generate', {
@@ -401,6 +670,7 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
             size,
             baseImages: baseImages.length > 0 ? baseImages : undefined,
           }),
+          signal,
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `第 ${i + 1} 张失败`);
@@ -410,15 +680,20 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           setCountGeneratedImages((prev) => [...prev, url]);
         }
       } catch (e) {
+        if (abortRequestedRef.current || (e instanceof Error && e.name === 'AbortError')) break;
         setProgress(null);
         setError(e instanceof Error ? e.message : `第 ${i + 1} 张生成失败`);
         setLoading(false);
+        abortControllerRef.current = null;
         return;
       }
     }
     setProgress(null);
     setLoading(false);
-    addToImageHistory(imagePrompt, [], [], urls);
+    abortControllerRef.current = null;
+    if (!abortRequestedRef.current && urls.length > 0) {
+      addToImageHistory(imagePrompt, [], [], urls);
+    }
   };
 
   const removeGenerated = (index: number) => {
@@ -428,9 +703,93 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
   };
 
   return (
-    <div className="flex-1 overflow-auto p-4">
+    <div className="flex-1 min-h-0 overflow-auto p-4 relative">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-[1400px] mx-auto">
         <div className="space-y-4">
+          {/* 精修放左侧顶部：避免排在整页最底部导致「找不到」 */}
+          <div
+            id="ecom-image-refine-panel"
+            className="rounded-lg border-4 border-amber-500 dark:border-amber-500 bg-amber-100 dark:bg-amber-950/50 p-4 space-y-3 shadow-md ring-2 ring-amber-300/80 dark:ring-amber-600/50"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <Wand2 className="w-6 h-6 shrink-0 text-amber-700 dark:text-amber-300" />
+              <span className="text-base font-bold text-amber-950 dark:text-amber-50">图片精修</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-600 text-white font-medium">看这里</span>
+            </div>
+            <p className="text-sm text-amber-950 dark:text-amber-100 leading-relaxed">
+              用 <strong>Gemini</strong> 在<strong>已有图片</strong>上按你的文字说明做优化。可先<strong>上传本地图片</strong>，或到下方「生成的图片」里点「精修」选图。
+            </p>
+            <input
+              ref={refineFileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const u = String(reader.result || '');
+                  if (u.startsWith('data:image/')) setRefineSourceUrl(u);
+                };
+                reader.readAsDataURL(f);
+                e.target.value = '';
+              }}
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-slate-700 dark:text-slate-300">当前原图：</span>
+              {refineSourceUrl ? (
+                <>
+                  <div className="w-14 h-14 rounded border-2 border-amber-500 overflow-hidden bg-white dark:bg-slate-800 shrink-0">
+                    <img src={refineSourceUrl} alt="" className="w-full h-full object-cover" />
+                  </div>
+                  <button
+                    type="button"
+                    className="text-xs px-3 py-1.5 rounded-lg border-2 border-slate-400 font-medium hover:bg-white dark:hover:bg-slate-800"
+                    onClick={() => setRefineSourceUrl(null)}
+                  >
+                    清除
+                  </button>
+                </>
+              ) : (
+                <span className="text-xs text-amber-900 dark:text-amber-200">未选择</span>
+              )}
+              <button
+                type="button"
+                disabled={refineLoading}
+                onClick={() => refineFileInputRef.current?.click()}
+                className="text-xs px-3 py-1.5 rounded-lg bg-amber-600 text-white font-semibold hover:bg-amber-700 disabled:opacity-50"
+              >
+                上传原图（可直接精修）
+              </button>
+            </div>
+            <textarea
+              value={refineInstruction}
+              onChange={(e) => setRefineInstruction(e.target.value)}
+              rows={3}
+              disabled={refineLoading}
+              placeholder="例如：整体提亮；去掉右下角杂物。若改中文卖点字，可写明要逐字替换的完整句子（仍可能偶发错字，见下）"
+              className="w-full text-sm rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-900 px-3 py-2 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 disabled:opacity-60"
+            />
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+              说明：图中文字由 AI「绘制」，常出现形近错字（如盈→缦），属模型能力限制，不是本工具传错字。重要文案建议在美图/PS 中叠字，或主图用英文短语。
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={refineLoading || !refineSourceUrl || !refineInstruction.trim()}
+                onClick={() => void runImageRefine()}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-600 text-white text-sm font-medium hover:bg-amber-700 disabled:opacity-50 disabled:pointer-events-none"
+              >
+                {refineLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                {refineLoading ? '精修中…' : '开始精修'}
+              </button>
+              {provider !== 'gemini' && (
+                <span className="text-xs text-red-600 dark:text-red-400">请先在顶部配置栏切换为 Gemini</span>
+              )}
+            </div>
+          </div>
+
           <section className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
             <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">产品信息 / 生图提示词</h2>
             <textarea
@@ -482,6 +841,84 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
                 </>
               )}
             </div>
+
+            {/* 同风格场景记忆：保存生成图+提示词，以后可一键应用生成其他产品的相似风格 */}
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-3 mb-3">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">同风格场景记忆</h3>
+                <span className="text-xs text-slate-500 dark:text-slate-400">本地保存（最多 {MAX_STYLE_MEMORY} 条）</span>
+              </div>
+              {styleNotice && (
+                <div className="mb-2 text-sm text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded px-2 py-1">
+                  {styleNotice}
+                </div>
+              )}
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                生成出满意图片后，保存「提示词 + 生成图」为记忆；应用后会用相同风格参考图+提示词，方便给其他产品生成相似场景。
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={styleName}
+                  onChange={(e) => setStyleName(e.target.value)}
+                  placeholder="记忆名称（可选），例如：白底主图风格 / 厨房场景"
+                  className="flex-1 min-w-[220px] px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
+                />
+                <button
+                  type="button"
+                  onClick={addStyleMemory}
+                  className="px-4 py-2 text-sm rounded bg-indigo-500 text-white hover:bg-indigo-600"
+                >
+                  保存当前提示词+生成图风格
+                </button>
+              </div>
+              {styleMemories.length > 0 ? (
+                <ul className="mt-3 space-y-2 max-h-56 overflow-y-auto">
+                  {styleMemories.map((m) => (
+                    <li key={m.id} className="flex items-start gap-2 p-2 rounded border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40">
+                      {m.styleImages && m.styleImages.length > 0 && (
+                        <div className="flex-shrink-0 flex gap-0.5">
+                          {m.styleImages.slice(0, 3).map((src, i) => (
+                            <div key={i} className="w-10 h-10 rounded border border-slate-300 dark:border-slate-600 overflow-hidden bg-slate-100">
+                              <img src={src} alt="" className="w-full h-full object-cover" />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-slate-700 dark:text-slate-200 truncate" title={m.name}>{m.name}</span>
+                          <span className="text-xs text-slate-500 dark:text-slate-400">{m.time}</span>
+                          {m.styleImages && m.styleImages.length > 0 && (
+                            <span className="text-xs text-sky-600 dark:text-sky-400">{m.styleImages.length} 张风格图</span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-600 dark:text-slate-300 mt-1 line-clamp-2" title={m.promptText}>
+                          {m.promptText}
+                        </p>
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <button
+                          type="button"
+                          onClick={() => applyStyleMemory(m)}
+                          className="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800"
+                        >
+                          应用
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeStyleMemory(m.id)}
+                          className="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-3">暂无记忆。生成出满意的图后，点「保存当前提示词+生成图风格」，以后可一键应用同风格生成其他产品。</p>
+              )}
+            </div>
             <textarea
               value={imagePrompt}
               onChange={(e) => setImagePrompt(e.target.value)}
@@ -491,7 +928,7 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
             />
           </section>
 
-          <section className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
+          <section ref={baseSectionRef} className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
             <div className="flex items-center justify-between mb-1">
               <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">产品主图（垫图）</h2>
               {baseImages.length > 0 && (
@@ -502,7 +939,11 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
               选择服务商为 <span className="font-semibold">Gemini</span> 时，会结合这里的垫图与上方文字提示生成新图。
-              {baseImages.length >= 2 ? ' 当前已添加多张垫图，AI 会<strong>同时参考所有图片</strong>，并按你在生图提示词中的要求进行<strong>对比、取舍或融合</strong>（如：保留第一张构图、第二张色调等）。' : ' 上传多张时，AI 会参考全部垫图并按你的提示词做对比与调整。'}
+              {baseImages.length >= 2 ? (
+                <> 当前已添加多张垫图，AI 会<strong>同时参考所有图片</strong>，并按你在生图提示词中的要求进行<strong>对比、取舍或融合</strong>（如：保留第一张构图、第二张色调等）。</>
+              ) : (
+                <> 上传多张时，AI 会参考全部垫图并按你的提示词做对比与调整。</>
+              )}
               若使用 DALL·E，仅支持文字提示，不参考垫图。
             </p>
             <input
@@ -710,18 +1151,33 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
               )}
             </button>
           </div>
-          {progress && (
+          {/* 生成过程中可随时点击停止 */}
+          <div className="mt-2 flex items-center gap-2">
+            <span className="text-xs text-slate-500 dark:text-slate-400">生成过程中可随时点击：</span>
+            <button
+              type="button"
+              onClick={stopGenerating}
+              disabled={!loading}
+              title={loading ? '点击停止当前生成' : '生成进行中时可点击停止'}
+              className="px-4 py-2 text-sm font-medium rounded-lg bg-red-500 text-white hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 border-2 border-red-500"
+            >
+              <Square className="w-4 h-4" /> 停止生成
+            </button>
+          </div>
+          {loading && (
             <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-3">
               <div className="flex justify-between text-sm text-slate-600 dark:text-slate-400 mb-2">
-                <span>正在生成第 {progress.current}/{progress.total} 张</span>
-                <span className="font-medium">{progress.label}</span>
+                <span>{progress ? `正在生成第 ${progress.current}/${progress.total} 张` : '正在生成 1 张…'}</span>
+                {progress && <span className="font-medium">{progress.label}</span>}
               </div>
-              <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
-                <div
-                  className="h-full bg-sky-500 transition-all duration-300"
-                  style={{ width: `${(progress.current / progress.total) * 100}%` }}
-                />
-              </div>
+              {progress && (
+                <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                  <div
+                    className="h-full bg-sky-500 transition-all duration-300"
+                    style={{ width: `${(progress.current / progress.total) * 100}%` }}
+                  />
+                </div>
+              )}
             </div>
           )}
           {error && <p className="text-sm text-red-500">{error}</p>}
@@ -807,7 +1263,12 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
         </section>
 
         <section className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-4 space-y-6">
-          <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">生成的图片</h2>
+          <div>
+            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">生成的图片</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+              每张图旁有「精修」；精修操作区在页面<strong className="text-amber-700 dark:text-amber-300">上方琥珀色卡片</strong>（左侧栏顶部）。
+            </p>
+          </div>
 
           {(mainGeneratedImages.length > 0 || detailGeneratedImages.length > 0) && (
             <>
@@ -820,6 +1281,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
                         <img src={url} alt={`主图 ${i + 1}`} className="w-36 h-36 object-cover cursor-pointer hover:opacity-90" onClick={() => setZoomImageUrl(url)} />
                         <div className="flex gap-1 p-1 bg-slate-50 dark:bg-slate-800">
                           <span className="text-xs text-slate-500 flex-1">主图 {i + 1}</span>
+                          <button type="button" className="text-xs px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700" onClick={() => downloadImage(url, `主图-${i + 1}.png`)} title="保存"><Download className="w-3 h-3 inline" /> 保存</button>
+                          <button type="button" disabled={scenePromptLoading} className="text-xs px-2 py-0.5 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50" onClick={() => extractScenePrompt(url)} title="提取场景提示词"><Sparkles className="w-3 h-3 inline" /> 场景</button>
+                          <button type="button" disabled={refineLoading} className="text-xs px-2 py-0.5 rounded border border-amber-400 text-amber-900 dark:text-amber-200 dark:border-amber-600 hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50" onClick={() => setRefineSourceUrl(url)} title="设为精修原图">精修</button>
                           <button type="button" className="text-xs px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700" onClick={() => setZoomImageUrl(url)}><ZoomIn className="w-3 h-3 inline" /></button>
                           <button type="button" className="text-xs px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" onClick={() => setMainGeneratedImages((p) => p.filter((_, j) => j !== i))}>删除</button>
                         </div>
@@ -837,6 +1301,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
                         <img src={url} alt={`详情图 ${i + 1}`} className="w-36 h-36 object-cover cursor-pointer hover:opacity-90" onClick={() => setZoomImageUrl(url)} />
                         <div className="flex gap-1 p-1 bg-slate-50 dark:bg-slate-800">
                           <span className="text-xs text-slate-500 flex-1">详情 {i + 1}</span>
+                          <button type="button" className="text-xs px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700" onClick={() => downloadImage(url, `详情图-${i + 1}.png`)} title="保存"><Download className="w-3 h-3 inline" /> 保存</button>
+                          <button type="button" disabled={scenePromptLoading} className="text-xs px-2 py-0.5 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50" onClick={() => extractScenePrompt(url)} title="提取场景提示词"><Sparkles className="w-3 h-3 inline" /> 场景</button>
+                          <button type="button" disabled={refineLoading} className="text-xs px-2 py-0.5 rounded border border-amber-400 text-amber-900 dark:text-amber-200 dark:border-amber-600 hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50" onClick={() => setRefineSourceUrl(url)} title="设为精修原图">精修</button>
                           <button type="button" className="text-xs px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700" onClick={() => setZoomImageUrl(url)}><ZoomIn className="w-3 h-3 inline" /></button>
                           <button type="button" className="text-xs px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" onClick={() => setDetailGeneratedImages((p) => p.filter((_, j) => j !== i))}>删除</button>
                         </div>
@@ -856,6 +1323,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
                   <div key={i} className={selectedGenerated === i ? 'ring-2 ring-sky-500 rounded-lg' : 'rounded-lg'}>
                     <img src={url} alt="" className="w-40 h-40 object-cover rounded-lg cursor-pointer" onClick={() => setSelectedGenerated(i)} />
                     <div className="flex gap-1 mt-1">
+                      <button type="button" className="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={() => downloadImage(url, `单张-${i + 1}.png`)} title="保存"><Download className="w-3 h-3 inline" /> 保存</button>
+                      <button type="button" disabled={scenePromptLoading} className="text-xs px-2 py-1 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50" onClick={() => extractScenePrompt(url)} title="提取场景提示词"><Sparkles className="w-3 h-3 inline" /> 场景</button>
+                      <button type="button" disabled={refineLoading} className="text-xs px-2 py-1 rounded border border-amber-400 text-amber-900 dark:text-amber-200 dark:border-amber-600 hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50" onClick={() => setRefineSourceUrl(url)} title="设为精修原图">精修</button>
                       <button type="button" className="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={() => setZoomImageUrl(url)}><ZoomIn className="w-3 h-3 inline" /> 大图</button>
                       <button type="button" className="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20" onClick={() => removeGenerated(i)}>删除</button>
                     </div>
@@ -874,6 +1344,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
                     <img src={url} alt={`第 ${i + 1} 张`} className="w-36 h-36 object-cover cursor-pointer hover:opacity-90" onClick={() => setZoomImageUrl(url)} />
                     <div className="flex gap-1 p-1 bg-slate-50 dark:bg-slate-800">
                       <span className="text-xs text-slate-500 flex-1">第 {i + 1} 张</span>
+                      <button type="button" className="text-xs px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700" onClick={() => downloadImage(url, `按数量-${i + 1}.png`)} title="保存"><Download className="w-3 h-3 inline" /> 保存</button>
+                      <button type="button" disabled={scenePromptLoading} className="text-xs px-2 py-0.5 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50" onClick={() => extractScenePrompt(url)} title="提取场景提示词"><Sparkles className="w-3 h-3 inline" /> 场景</button>
+                      <button type="button" disabled={refineLoading} className="text-xs px-2 py-0.5 rounded border border-amber-400 text-amber-900 dark:text-amber-200 dark:border-amber-600 hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50" onClick={() => setRefineSourceUrl(url)} title="设为精修原图">精修</button>
                       <button type="button" className="text-xs px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700" onClick={() => setZoomImageUrl(url)}><ZoomIn className="w-3 h-3 inline" /></button>
                       <button type="button" className="text-xs px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" onClick={() => setCountGeneratedImages((p) => p.filter((_, j) => j !== i))}>删除</button>
                     </div>
@@ -892,6 +1365,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
                     <img src={url} alt={`批量 ${i + 1}`} className="w-36 h-36 object-cover cursor-pointer hover:opacity-90" onClick={() => setZoomImageUrl(url)} />
                     <div className="flex gap-1 p-1 bg-slate-50 dark:bg-slate-800">
                       <span className="text-xs text-slate-500 flex-1">批量 {i + 1}</span>
+                      <button type="button" className="text-xs px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700" onClick={() => downloadImage(url, `批量-${i + 1}.png`)} title="保存"><Download className="w-3 h-3 inline" /> 保存</button>
+                      <button type="button" disabled={scenePromptLoading} className="text-xs px-2 py-0.5 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50" onClick={() => extractScenePrompt(url)} title="提取场景提示词"><Sparkles className="w-3 h-3 inline" /> 场景</button>
+                      <button type="button" disabled={refineLoading} className="text-xs px-2 py-0.5 rounded border border-amber-400 text-amber-900 dark:text-amber-200 dark:border-amber-600 hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50" onClick={() => setRefineSourceUrl(url)} title="设为精修原图">精修</button>
                       <button type="button" className="text-xs px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700" onClick={() => setZoomImageUrl(url)}><ZoomIn className="w-3 h-3 inline" /></button>
                       <button type="button" className="text-xs px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" onClick={() => setBatchGeneratedImages((p) => p.filter((_, j) => j !== i))}>删除</button>
                     </div>
@@ -914,11 +1390,41 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           >
             <button
               type="button"
-              className="absolute top-4 right-4 z-10 w-10 h-10 rounded-full bg-white/90 dark:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center justify-center hover:bg-white shadow"
+              className="absolute top-4 right-14 z-10 w-10 h-10 rounded-full bg-white/90 dark:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center justify-center hover:bg-white shadow"
               onClick={() => setZoomImageUrl(null)}
               aria-label="关闭"
             >
               <X className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              disabled={refineLoading}
+              className="absolute top-4 left-4 z-10 px-4 py-2 rounded-full bg-amber-500 text-white flex items-center gap-2 hover:bg-amber-600 shadow disabled:opacity-60"
+              onClick={(e) => {
+                e.stopPropagation();
+                setRefineSourceUrl(zoomImageUrl);
+                setZoomImageUrl(null);
+              }}
+              aria-label="带入精修"
+            >
+              <Wand2 className="w-5 h-5" /> 带入精修
+            </button>
+            <button
+              type="button"
+              className="absolute top-4 right-4 z-10 px-4 py-2 rounded-full bg-sky-500 text-white flex items-center gap-2 hover:bg-sky-600 shadow"
+              onClick={(e) => { e.stopPropagation(); downloadImage(zoomImageUrl, '生成的图片.png'); }}
+              aria-label="保存"
+            >
+              <Download className="w-5 h-5" /> 保存
+            </button>
+            <button
+              type="button"
+              className="absolute top-4 right-44 z-10 px-4 py-2 rounded-full bg-indigo-500 text-white flex items-center gap-2 hover:bg-indigo-600 shadow disabled:opacity-60"
+              disabled={scenePromptLoading}
+              onClick={(e) => { e.stopPropagation(); extractScenePrompt(zoomImageUrl); }}
+              aria-label="提取场景提示词"
+            >
+              <Sparkles className="w-5 h-5" /> 提取场景提示词
             </button>
             <img
               src={zoomImageUrl}

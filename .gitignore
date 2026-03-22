@@ -36,3 +36,12 @@ Thumbs.db
 
 # TypeScript
 *.tsbuildinfo
+
+# 视频接口落盘的预览文件（体积大）
+public/generated-videos/*.mp4
+
+# 本机启动脚本占用的单实例锁（空目录）
+.ecom-ai-tool-running/
+
+# 由「启动网页版-无需npm.command」生成的入口链接
+ecom-local.html

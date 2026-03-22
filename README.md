@@ -2,6 +2,15 @@
 
 Web 端半自动化工具（Vercel 部署用一次提交触发构建）：产品解析、SEO 文案生成、场景图生成、图生视频/文生视频。用户自行配置 API Key，按量使用。
 
+## 不会安装 Node / 没有 npm？（简易版，可先做图文与生图）
+
+在 Finder 中进入本项目文件夹，**双击运行 `启动网页版-无需npm.command`**（若提示安全限制：按住 Control 点文件 → **打开**）。  
+脚本会优先用 Mac 自带的 **Python3**，没有则用 **Ruby** 在 **http://127.0.0.1:8765** 打开精简网页版，**无需** `npm install`。  
+同文件夹里的 **`请先看-如何启动.txt`** 是给你打印或发给同事看的步骤说明。  
+**注意**：批量垫图、视频生成、历史记录等完整功能仍需下方「安装 Node + start.sh」。
+
+---
+
 ## 如何打开页面（解决「无法访问此网站 / localhost 拒绝连接」）
 
 1. **安装 Node.js**（若未安装）  
@@ -14,7 +23,7 @@ Web 端半自动化工具（Vercel 部署用一次提交触发构建）：产品
      npm install
      npm run dev
      ```
-   - **方式 B**：在 Finder 里双击项目中的 `start.sh`（若提示无权限，先在终端执行：`chmod +x "/Users/chenxiu/Downloads/AI chenxiu/start.sh"`，再双击运行）。或在终端执行：
+   - **方式 B（Mac）**：在 Finder 里双击 **`双击我启动.command`**（或 `启动完整版-稳定模式.command`）。**不要双击 `start.sh`**——在 Mac 上通常不会执行。或在终端执行：
      ```bash
      cd "/Users/chenxiu/Downloads/AI chenxiu"
      chmod +x start.sh
@@ -25,13 +34,39 @@ Web 端半自动化工具（Vercel 部署用一次提交触发构建）：产品
 
 若仍提示「localhost 拒绝了我们的连接请求」，说明开发服务器未在运行，请确认上述命令是在**本机**终端执行且没有报错。
 
+### 白屏且出现 `missing required error components, refreshing...`
+
+说明你用了 **`npm run dev`（开发模式）**。本仓库**默认已改为稳定启动**：
+
+- **双击 `双击我启动.command`**（或 `启动完整版-稳定模式.command`）：会先构建再 `next start`，**不要**再单独跑 `npm run dev`。
+- 仅在你改代码要调试时，才用：`./start.sh --dev`
+
+**建议**：Chrome 不要对 `localhost` 开启整页翻译。  
+用稳定模式时，改代码后需**再双击一次 `双击我启动.command`** 才会看到更新。
+
+### 页面错乱 / 刷新后没样式 / 打不开
+
+常见原因：**同时开了多个 `npm run dev`**、或 `.next` 缓存损坏，导致 `layout.css` 加载失败。
+
+在项目目录终端依次执行：
+
+```bash
+cd "/Users/chenxiu/Downloads/AI chenxiu"
+chmod +x start.sh
+./start.sh --kill-ports   # 释放 3000–3010 端口
+./start.sh --clean        # 删除 .next
+./start.sh                # 再启动
+```
+
+启动后看终端里显示的地址（可能是 `http://localhost:3000` 或 `3001`…），用浏览器打开**终端里那一行**，并 **Cmd+Shift+R** 强制刷新。
+
 **给同事共用**：见下方「给同事共用（生成网站）」一节，可用局域网 IP 或部署成公网网站。
 
 ## 功能
 
 - **图文工作区**：输入产品原始标题/卖点/描述，AI 解析产品画像（卖点、人群、场景、痛点等），一键生成平台化、多语种标题、Bullet Points、详情描述；支持自定义提示词模板与保存到文件。
-- **图像生成**：根据产品信息自动生成生图 Prompt，支持 DALL-E 2/3 生图、比例与尺寸选择；支持上传产品主图（垫图，为后续扩展预留）。
-- **视频生成**：图生视频（上传产品图 + 可选动作描述）、文生视频（输入脚本/描述），对接 Runway API（需自行配置 Runway API Key）。
+- **图像生成**：根据产品信息自动生成生图 Prompt；支持 **Gemini 生图**（如 Nano Banana）与 **DALL-E**；支持产品垫图。**图片精修**：在已生成图基础上用自然语言说明做光影/去污/文字等优化（仅 Gemini），结果加入「单张生成」列表。
+- **视频生成**：图生视频（上传产品图 + 可选动作描述）、文生视频（输入脚本/描述），支持 **Gemini Veo** 与 Runway 等。**Veo 返回的 MP4 会保存到 `public/generated-videos/` 并以短链接返回**，避免整段 base64 塞进 JSON 导致浏览器长时间卡在「生成中」。
 
 ## 技术栈
 
@@ -112,5 +147,5 @@ npm start
 ## 注意事项
 
 - API Key 仅在前端与 Next.js API 路由间传递，不写入数据库；请勿将 Key 提交到代码库。
-- 生图当前仅支持 OpenAI DALL-E；垫图（baseImage）已预留，后续可接入支持图生图的模型。
+- 生图支持 Gemini（含垫图、精修）与 OpenAI DALL-E；精修功能需选择服务商 **Gemini**。
 - 视频生成依赖 Runway，需在配置中填写 Runway API Key；可灵(Kling) 等可后续按同样方式接入。
