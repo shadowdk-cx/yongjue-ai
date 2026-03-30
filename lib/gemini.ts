@@ -240,6 +240,26 @@ export function buildImageRefinePrompt(userInstruction: string, language: 'en' |
   );
 }
 
+/**
+ * 店铺页「在原图上改版并替换展示」：强调同一产品、可替换主图/详情图（Nano Banana 2 等 Gemini 图像模型）。
+ */
+export function buildEcomShopRemixPrompt(userInstruction: string, language: 'en' | 'zh'): string {
+  const t = userInstruction.trim();
+  if (!t) return '';
+  if (language === 'zh') {
+    return (
+      '这是店铺商品展示用图。请在**严格保持同一产品**（造型、颜色、款式、比例一致，不可替换为其他商品或模型）的前提下，按以下要求生成一张**可直接替换当前展位**的新版本电商图（主图或详情图用途）：\n\n' +
+      `【改版要求】\n${t}\n\n` +
+      '若画面含中文文案：必须与用户给出的每个汉字完全一致。输出单张完整、清晰、专业光影的成品图。'
+    );
+  }
+  return (
+    'This is a product image used on an e-commerce storefront. Generate ONE new version that can **replace the current listing image**, while **strictly keeping the same product** (same shape, color, variant, proportions—do not substitute a different product). Requirements:\n\n' +
+    `【Changes】\n${t}\n\n` +
+    'Output one complete, sharp, professionally lit e-commerce ready image.'
+  );
+}
+
 /** 含中文时追加说明：图像模型画字易错字，仅能尽量约束，无法从工具侧根治 */
 function appendChineseTypographyHint(prompt: string): string {
   if (!/[\u4e00-\u9fff]/.test(prompt)) return prompt;
@@ -299,7 +319,22 @@ export async function generateImageGemini(
     contents,
     config: { responseModalities: ['TEXT', 'IMAGE'] },
   } as Parameters<GoogleGenAI['models']['generateContent']>[0]);
-  const res = response as { candidates?: Array<{ content?: { parts?: Array<{ text?: string; inlineData?: { data?: string; mimeType?: string } }> } }> };
+  const res = response as {
+    candidates?: Array<{
+      finishReason?: string;
+      content?: { parts?: Array<{ text?: string; inlineData?: { data?: string; mimeType?: string } }> };
+    }>;
+    promptFeedback?: { blockReason?: string; blockReasonMessage?: string };
+    text?: string;
+  };
+
+  const blockReason = res.promptFeedback?.blockReason;
+  if (blockReason) {
+    const msg = res.promptFeedback?.blockReasonMessage;
+    throw new Error(
+      `Gemini 提示词未通过安全策略：${blockReason}${msg ? `（${msg}）` : ''}。请缩短/改写提示词或换一张垫图再试。`
+    );
+  }
 
   const candidates = res.candidates;
   const parts = candidates?.[0]?.content?.parts ?? [];
@@ -309,5 +344,14 @@ export async function generateImageGemini(
       return `data:${mime};base64,${part.inlineData.data}`;
     }
   }
-  throw new Error('Gemini 未返回图片');
+
+  const finish = candidates?.[0]?.finishReason;
+  const textHint = typeof res.text === 'string' && res.text.trim() ? res.text.trim().slice(0, 400) : '';
+  const hint = [
+    'Gemini 未返回图片',
+    finish ? `（finishReason: ${finish}）` : '',
+    textHint ? `。模型返回文本：${textHint}` : '',
+    '。若多次出现：请尝试换成「Nano Banana」模型（gemini-2.5-flash-image）、或减少垫图数量/缩小垫图体积。',
+  ].join('');
+  throw new Error(hint);
 }

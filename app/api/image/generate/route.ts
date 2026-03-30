@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createOpenAI } from '@/lib/openai';
 import { createGeminiClient, generateImageGemini, buildImageRefinePrompt } from '@/lib/gemini';
+import { formatUpstreamError } from '@/lib/format-upstream-error';
 
 export const maxDuration = 300;
 
@@ -89,7 +90,7 @@ export async function POST(req: NextRequest) {
     }
     return NextResponse.json({ error: '当前仅支持 DALL-E 或 Gemini，请选择提供商' }, { status: 400 });
   } catch (e) {
-    const message = e instanceof Error ? e.message : '生图失败';
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error('[api/image/generate]', e);
+    return NextResponse.json({ error: formatUpstreamError(e, 'Gemini 生图') }, { status: 500 });
   }
 }

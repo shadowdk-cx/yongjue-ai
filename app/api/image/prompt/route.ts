@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createOpenAI, generateImagePrompt, generateFullSetImagePrompts } from '@/lib/openai';
 import { createGeminiClient, generateImagePromptGemini, generateFullSetImagePromptsGemini, generateImagePromptFromImagesGemini, generateFullSetImagePromptsFromImagesGemini } from '@/lib/gemini';
+import { formatUpstreamError } from '@/lib/format-upstream-error';
 
 export async function POST(req: NextRequest) {
   try {
@@ -57,7 +58,7 @@ export async function POST(req: NextRequest) {
     const prompt = await generateImagePrompt(openai, model || 'gpt-4o', productInfo, lang);
     return NextResponse.json({ prompt });
   } catch (e) {
-    const message = e instanceof Error ? e.message : '生成失败';
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error('[api/image/prompt]', e);
+    return NextResponse.json({ error: formatUpstreamError(e, 'Gemini 生图 Prompt') }, { status: 500 });
   }
 }

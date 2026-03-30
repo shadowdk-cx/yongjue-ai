@@ -11,6 +11,7 @@
     "build": "next build",
     "start": "next start",
     "start:share": "next start -H 0.0.0.0",
+    "start:share:awake": "caffeinate -dims npm run start:share",
     "local:stable": "next build && next start",
     "lint": "next lint"
   },

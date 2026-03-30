@@ -7,6 +7,32 @@ type ImageWorkflowProps = { apiKey: string; provider: 'gemini' | 'openai'; textM
 
 const SEP = '\n---\n';
 
+/** 避免 HTML 错误页导致 res.json() 抛错，只显示「fetch failed」 */
+async function readApiJson(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error(`服务器返回非 JSON（HTTP ${res.status}）。请在运行工具的终端里查看红色报错。`);
+  }
+}
+
+function pickImageUrl(data: Record<string, unknown>): string | undefined {
+  const u = data.url;
+  if (typeof u === 'string' && u) return u;
+  const arr = data.data;
+  if (Array.isArray(arr) && arr[0] && typeof (arr[0] as { url?: unknown }).url === 'string') {
+    const s = (arr[0] as { url: string }).url;
+    return s || undefined;
+  }
+  return undefined;
+}
+
+function asStringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
 type ImageRecord = {
   id: string;
   time: string;
@@ -129,8 +155,8 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           language: promptLanguage,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '提取失败');
+      const data = await readApiJson(res);
+      if (!res.ok) throw new Error(String(data.error || '提取失败'));
       const prompt = String(data.prompt || '').trim();
       if (!prompt) throw new Error('未返回提示词');
       setImagePrompt(prompt);
@@ -177,8 +203,8 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           size,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '精修失败');
+      const data = await readApiJson(res);
+      if (!res.ok) throw new Error(String(data.error || '精修失败'));
       const url = typeof data.url === 'string' ? data.url : '';
       if (!url) throw new Error('未返回图片');
       setGeneratedImages((prev) => [url, ...prev]);
@@ -416,9 +442,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           }),
           signal,
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `第 ${i + 1} 张失败`);
-        const url = data.url || data.data?.[0]?.url;
+        const data = await readApiJson(res);
+        if (!res.ok) throw new Error(String(data.error || `第 ${i + 1} 张失败`));
+        const url = pickImageUrl(data);
         if (url) {
           urls.push(url);
           setBatchGeneratedImages((prev) => [...prev, url]);
@@ -460,16 +486,15 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           fullSet: fullSet ?? false,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '生成失败');
+      const data = await readApiJson(res);
+      if (!res.ok) throw new Error(String(data.error || '生成失败'));
       if (fullSet && data.mainPrompts && data.detailPrompts) {
-        setFullSetPrompts({
-          main: Array.isArray(data.mainPrompts) ? data.mainPrompts : [],
-          detail: Array.isArray(data.detailPrompts) ? data.detailPrompts : [],
-        });
-        setImagePrompt([...(data.mainPrompts || []), ...(data.detailPrompts || [])].join(SEP));
+        const main = asStringArray(data.mainPrompts);
+        const detail = asStringArray(data.detailPrompts);
+        setFullSetPrompts({ main, detail });
+        setImagePrompt([...main, ...detail].join(SEP));
       } else {
-        setImagePrompt(data.prompt || '');
+        setImagePrompt(String(data.prompt || ''));
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '生成失败');
@@ -506,16 +531,15 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           fullSet: fullSet ?? false,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '生成失败');
+      const data = await readApiJson(res);
+      if (!res.ok) throw new Error(String(data.error || '生成失败'));
       if (fullSet && data.mainPrompts && data.detailPrompts) {
-        setFullSetPrompts({
-          main: Array.isArray(data.mainPrompts) ? data.mainPrompts : [],
-          detail: Array.isArray(data.detailPrompts) ? data.detailPrompts : [],
-        });
-        setImagePrompt([...(data.mainPrompts || []), ...(data.detailPrompts || [])].join(SEP));
+        const main = asStringArray(data.mainPrompts);
+        const detail = asStringArray(data.detailPrompts);
+        setFullSetPrompts({ main, detail });
+        setImagePrompt([...main, ...detail].join(SEP));
       } else {
-        setImagePrompt(data.prompt || '');
+        setImagePrompt(String(data.prompt || ''));
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '生成失败');
@@ -548,6 +572,7 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
     abortControllerRef.current = new AbortController();
     const { signal } = abortControllerRef.current;
     try {
+      const singlePrompt = getPromptList(1)[0] || imagePrompt.trim();
       const res = await fetch('/api/image/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -555,15 +580,15 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           apiKey,
           provider,
           model: imageModel,
-          prompt: imagePrompt,
+          prompt: singlePrompt,
           size,
           baseImages: baseImages.length > 0 ? baseImages : undefined,
         }),
         signal,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '生图失败');
-      const url = data.url || data.data?.[0]?.url;
+      const data = await readApiJson(res);
+      if (!res.ok) throw new Error(String(data.error || '生图失败'));
+      const url = pickImageUrl(data);
       if (url) {
         setGeneratedImages((prev) => [...prev, url]);
         addToImageHistory(imagePrompt, [], [], [url]);
@@ -612,9 +637,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           }),
           signal,
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `第 ${i + 1} 张失败`);
-        const url = data.url || data.data?.[0]?.url;
+        const data = await readApiJson(res);
+        if (!res.ok) throw new Error(String(data.error || `第 ${i + 1} 张失败`));
+        const url = pickImageUrl(data);
         if (url) {
           if (i < 5) {
             mainUrls.push(url);
@@ -672,9 +697,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           }),
           signal,
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `第 ${i + 1} 张失败`);
-        const url = data.url || data.data?.[0]?.url;
+        const data = await readApiJson(res);
+        if (!res.ok) throw new Error(String(data.error || `第 ${i + 1} 张失败`));
+        const url = pickImageUrl(data);
         if (url) {
           urls.push(url);
           setCountGeneratedImages((prev) => [...prev, url]);
