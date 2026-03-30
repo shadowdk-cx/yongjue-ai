@@ -12,6 +12,7 @@ const SIZE_MAP: Record<string, '1024x1024' | '1792x1024' | '1024x1792'> = {
 };
 
 export async function POST(req: NextRequest) {
+  const _reqStart = Date.now();
   try {
     const body = await req.json();
     const {
@@ -90,7 +91,8 @@ export async function POST(req: NextRequest) {
     }
     return NextResponse.json({ error: '当前仅支持 DALL-E 或 Gemini，请选择提供商' }, { status: 400 });
   } catch (e) {
-    console.error('[api/image/generate]', e);
+    const elapsed = Date.now() - _reqStart;
+    console.error(`[api/image/generate] 耗时 ${elapsed}ms`, e);
     return NextResponse.json({ error: formatUpstreamError(e, 'Gemini 生图') }, { status: 500 });
   }
 }
