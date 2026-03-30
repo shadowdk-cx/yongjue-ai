@@ -314,11 +314,19 @@ export async function generateImageGemini(
     ];
   }
 
-  const response = await ai.models.generateContent({
-    model: imageModel,
-    contents,
-    config: { responseModalities: ['TEXT', 'IMAGE'] },
-  } as Parameters<GoogleGenAI['models']['generateContent']>[0]);
+  const IMAGE_TIMEOUT_MS = 90_000;
+  const response = await Promise.race([
+    ai.models.generateContent({
+      model: imageModel,
+      contents,
+      config: { responseModalities: ['TEXT', 'IMAGE'] },
+    } as Parameters<GoogleGenAI['models']['generateContent']>[0]),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(
+        `Gemini 生图超时（${IMAGE_TIMEOUT_MS / 1000} 秒未返回）。可能原因：① 网络不稳定；② 模型繁忙。请稍后重试，或换「Nano Banana」模型。`
+      )), IMAGE_TIMEOUT_MS)
+    ),
+  ]);
   const res = response as {
     candidates?: Array<{
       finishReason?: string;
