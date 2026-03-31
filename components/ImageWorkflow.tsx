@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Loader2, Plus, Trash2, ZoomIn, Image as ImageIcon, Clock, ChevronDown, ChevronUp, X, Download, Square, Sparkles, Wand2 } from 'lucide-react';
+import { compressImageDataUrl, compressImages } from '@/lib/compress-image';
 
 type ImageWorkflowProps = { apiKey: string; provider: 'gemini' | 'openai'; textModel?: string; imageModel: string };
 
@@ -100,6 +101,17 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
   const [loadingPrompt, setLoadingPrompt] = useState(false);
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const loadingStartRef = useRef(0);
+
+  useEffect(() => {
+    if (!loading) { setElapsedSec(0); return; }
+    loadingStartRef.current = Date.now();
+    const id = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - loadingStartRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [loading]);
   const [scenePromptLoading, setScenePromptLoading] = useState(false);
   const [imageHistory, setImageHistory] = useState<ImageRecord[]>([]);
   const [showImageHistory, setShowImageHistory] = useState(false);
@@ -121,15 +133,16 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
   const abortRequestedRef = useRef(false);
 
   const toDataUrl = useCallback(async (url: string): Promise<string> => {
-    if (url.startsWith('data:')) return url;
+    if (url.startsWith('data:')) return compressImageDataUrl(url);
     const res = await fetch(url);
     const blob = await res.blob();
-    return await new Promise<string>((resolve, reject) => {
+    const raw = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result || ''));
       reader.onerror = () => reject(new Error('读取图片失败'));
       reader.readAsDataURL(blob);
     });
+    return compressImageDataUrl(raw);
   }, []);
 
   const extractScenePrompt = useCallback(async (imgUrl: string) => {
@@ -359,50 +372,44 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
     saveImageHistory([]);
   };
 
-  const addBaseImages = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const addBaseImages = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files?.length) return;
     const count = Math.min(files.length, 8 - baseImages.length);
     if (count <= 0) return;
-    const results: (string | null)[] = new Array(count);
-    let done = 0;
+    const readPromises: Promise<string>[] = [];
     for (let i = 0; i < count; i++) {
-      const reader = new FileReader();
-      const index = i;
-      reader.onload = () => {
-        results[index] = reader.result as string;
-        done++;
-        if (done === count) {
-          const ordered = results.filter((r): r is string => r != null);
-          setBaseImages((prev) => [...prev, ...ordered].slice(0, 8));
-        }
-      };
-      reader.readAsDataURL(files[i]);
+      readPromises.push(new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(files[i]);
+      }));
     }
+    const raw = (await Promise.all(readPromises)).filter(Boolean);
+    const compressed = await compressImages(raw);
+    setBaseImages((prev) => [...prev, ...compressed].slice(0, 8));
     e.target.value = '';
   };
 
   const MAX_BATCH_SOURCES = 30;
-  const addBatchSourceImages = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const addBatchSourceImages = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files?.length) return;
     const count = Math.min(files.length, MAX_BATCH_SOURCES - batchSourceImages.length);
     if (count <= 0) return;
-    const results: (string | null)[] = new Array(count);
-    let done = 0;
+    const readPromises: Promise<string>[] = [];
     for (let i = 0; i < count; i++) {
-      const reader = new FileReader();
-      const index = i;
-      reader.onload = () => {
-        results[index] = reader.result as string;
-        done++;
-        if (done === count) {
-          const ordered = results.filter((r): r is string => r != null);
-          setBatchSourceImages((prev) => [...prev, ...ordered].slice(0, MAX_BATCH_SOURCES));
-        }
-      };
-      reader.readAsDataURL(files[i]);
+      readPromises.push(new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(files[i]);
+      }));
     }
+    const raw = (await Promise.all(readPromises)).filter(Boolean);
+    const compressed = await compressImages(raw);
+    setBatchSourceImages((prev) => [...prev, ...compressed].slice(0, MAX_BATCH_SOURCES));
     e.target.value = '';
   };
 
@@ -749,13 +756,16 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
               type="file"
               accept="image/*"
               className="hidden"
-              onChange={(e) => {
+              onChange={async (e) => {
                 const f = e.target.files?.[0];
                 if (!f) return;
                 const reader = new FileReader();
-                reader.onload = () => {
+                reader.onload = async () => {
                   const u = String(reader.result || '');
-                  if (u.startsWith('data:image/')) setRefineSourceUrl(u);
+                  if (u.startsWith('data:image/')) {
+                    const compressed = await compressImageDataUrl(u);
+                    setRefineSourceUrl(compressed);
+                  }
                 };
                 reader.readAsDataURL(f);
                 e.target.value = '';
@@ -1193,7 +1203,10 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
             <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-3">
               <div className="flex justify-between text-sm text-slate-600 dark:text-slate-400 mb-2">
                 <span>{progress ? `正在生成第 ${progress.current}/${progress.total} 张` : '正在生成 1 张…'}</span>
-                {progress && <span className="font-medium">{progress.label}</span>}
+                <span className="font-mono tabular-nums text-sky-600 dark:text-sky-400">
+                  {elapsedSec >= 60 ? `${Math.floor(elapsedSec / 60)}分${elapsedSec % 60}秒` : `${elapsedSec}秒`}
+                  {progress ? ` · ${progress.label}` : ''}
+                </span>
               </div>
               {progress && (
                 <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
