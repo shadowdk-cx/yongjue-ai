@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createGeminiClient, generateImageGemini, buildImageRefinePrompt, buildEcomShopRemixPrompt } from '@/lib/gemini';
+import { persistDataUrlAsPublicUrl } from '@/lib/persist-artifact';
 
 export const maxDuration = 300;
 
@@ -76,7 +77,8 @@ export async function POST(request: NextRequest) {
 
     const ai = createGeminiClient(geminiKey);
     const dataUrl = await generateImageGemini(ai, model, prompt, imageDataUrl);
-    return NextResponse.json({ url: dataUrl, model }, { headers: cors });
+    const url = persistDataUrlAsPublicUrl(dataUrl);
+    return NextResponse.json({ url, model }, { headers: cors });
   } catch (e) {
     const message = e instanceof Error ? e.message : '生图失败';
     return NextResponse.json({ error: message }, { status: 500, headers: cors });

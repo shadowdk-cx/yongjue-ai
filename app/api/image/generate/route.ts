@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createOpenAI } from '@/lib/openai';
 import { createGeminiClient, generateImageGemini, buildImageRefinePrompt } from '@/lib/gemini';
 import { formatUpstreamError } from '@/lib/format-upstream-error';
+import { persistDataUrlAsPublicUrl } from '@/lib/persist-artifact';
 
 export const maxDuration = 300;
 
@@ -60,7 +61,8 @@ export async function POST(req: NextRequest) {
       const ai = createGeminiClient(apiKey);
       const imageModel = model || 'gemini-2.5-flash-image';
       const dataUrl = await generateImageGemini(ai, imageModel, composed, src);
-      return NextResponse.json({ url: dataUrl });
+      const url = persistDataUrlAsPublicUrl(dataUrl);
+      return NextResponse.json({ url });
     }
 
     if (!prompt?.trim()) {
@@ -70,7 +72,8 @@ export async function POST(req: NextRequest) {
       const ai = createGeminiClient(apiKey);
       const imageModel = model || 'gemini-2.5-flash-image';
       const dataUrl = await generateImageGemini(ai, imageModel, prompt.trim(), refImages);
-      return NextResponse.json({ url: dataUrl });
+      const url = persistDataUrlAsPublicUrl(dataUrl);
+      return NextResponse.json({ url });
     }
     const openai = createOpenAI(apiKey);
     const sizeOption = SIZE_MAP[size] || '1024x1024';

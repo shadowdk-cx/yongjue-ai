@@ -39,6 +39,9 @@ Thumbs.db
 
 # 视频接口落盘的预览文件（体积大）
 public/generated-videos/*.mp4
+# 生图落盘（体积大）
+public/generated-images/*
+!public/generated-images/.gitkeep
 
 # 本机启动脚本占用的单实例锁（空目录）
 .ecom-ai-tool-running/

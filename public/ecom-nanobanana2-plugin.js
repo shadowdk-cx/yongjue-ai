@@ -47,6 +47,15 @@
     });
   }
 
+  /** API 可能返回 data URL，或本站相对路径（如 /generated-images/xxx.png） */
+  function resolveResultImageUrl(u) {
+    if (!u) return '';
+    if (u.indexOf('data:image/') === 0) return u;
+    if (u.indexOf('https://') === 0 || u.indexOf('http://') === 0) return u;
+    if (u.indexOf('/') === 0) return apiOrigin + u;
+    return '';
+  }
+
   function imgToDataUrl(img) {
     var src = img.currentSrc || img.src;
     if (src.indexOf('data:image/') === 0) return Promise.resolve(src);
@@ -266,8 +275,8 @@
           });
         })
         .then(function (data) {
-          var url = data.url;
-          if (!url || url.indexOf('data:image/') !== 0) throw new Error('未返回图片');
+          var url = resolveResultImageUrl(data.url);
+          if (!url) throw new Error('未返回图片');
           img.src = url;
           if (img.srcset) img.removeAttribute('srcset');
           if (img.sizes) img.removeAttribute('sizes');
