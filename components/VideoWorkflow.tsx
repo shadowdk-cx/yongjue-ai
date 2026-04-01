@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Loader2, Image as ImageIcon, Video, Upload, Plus, Trash2 } from 'lucide-react';
+import { compressImages } from '@/lib/compress-image';
 
 type VideoWorkflowProps = { apiKey: string; videoApiKey: string; videoModel: string };
 
@@ -10,8 +11,20 @@ type TabMode = 'image2video' | 'text2video';
 /** 产品垫图最多张数：与 Veo 3.1 多图参考上限一致 */
 const MAX_PRODUCT_IMAGES = 3;
 
-/** 略大于视频 API route（maxDuration 约 320s），避免浏览器无限等待 */
+/** 整段流程（提交 + 多次轮询）上限，略大于服务端任务有效期 */
 const CLIENT_VIDEO_TIMEOUT_MS = 340000;
+
+const POLL_INTERVAL_MS = 8000;
+
+async function readApiJson(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error(`服务器返回非 JSON（HTTP ${res.status}）`);
+  }
+}
 
 function isAbortLike(e: unknown): boolean {
   if (!(e instanceof Error)) return false;
@@ -52,40 +65,62 @@ export function VideoWorkflow({ apiKey, videoApiKey, videoModel }: VideoWorkflow
     };
   }, []);
 
-  const postVideoApi = useCallback((path: string, body: Record<string, unknown>) => {
-    videoAbortRef.current?.abort();
-    const ctrl = new AbortController();
-    videoAbortRef.current = ctrl;
-    const killTimer = setTimeout(() => ctrl.abort(), CLIENT_VIDEO_TIMEOUT_MS);
-    return fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    }).then(
-      async (res) => {
-        let data: { error?: string; videoUrl?: string; url?: string } = {};
-        try {
-          data = await res.json();
-        } catch (_parseErr) {
-          /* 非 JSON 响应 */
-        }
-        if (!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
-        return data;
+  const pollUntilVideoReady = useCallback(async (jobId: string, signal: AbortSignal) => {
+    const deadline = Date.now() + CLIENT_VIDEO_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      const res = await fetch(`/api/video/job/${encodeURIComponent(jobId)}`, { signal });
+      const data = await readApiJson(res);
+      const status = typeof data.status === 'string' ? data.status : '';
+      if (status === 'done') {
+        const u = (typeof data.videoUrl === 'string' && data.videoUrl)
+          ? data.videoUrl
+          : (typeof data.url === 'string' ? data.url : '');
+        if (u) return u;
+        throw new Error('已完成但未返回视频地址');
       }
-    ).then(
-      (data) => {
-        clearTimeout(killTimer);
-        return data;
-      },
-      (err) => {
-        clearTimeout(killTimer);
-        throw err;
+      if (status === 'error') {
+        throw new Error(typeof data.error === 'string' ? data.error : '视频生成失败');
       }
-    );
+      if (!res.ok) {
+        throw new Error(typeof data.error === 'string' ? data.error : `轮询失败 (${res.status})`);
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
+    throw new Error('等待视频超时，请重试');
   }, []);
 
-  const onImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  /** 先 POST 提交任务（短连接），再轮询 GET，避免 Zeabur 等网关长连接中断 */
+  const runVideoJob = useCallback(
+    async (path: string, body: Record<string, unknown>) => {
+      videoAbortRef.current?.abort();
+      const ctrl = new AbortController();
+      videoAbortRef.current = ctrl;
+      const killTimer = setTimeout(() => ctrl.abort(), CLIENT_VIDEO_TIMEOUT_MS);
+      try {
+        const res = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: ctrl.signal,
+        });
+        const data = await readApiJson(res);
+        if (!res.ok) {
+          throw new Error(typeof data.error === 'string' ? data.error : `请求失败 (${res.status})`);
+        }
+        const jobId = typeof data.jobId === 'string' ? data.jobId : '';
+        if (!jobId) {
+          throw new Error('服务器未返回任务 ID，请刷新页面后重试');
+        }
+        return await pollUntilVideoReady(jobId, ctrl.signal);
+      } finally {
+        clearTimeout(killTimer);
+      }
+    },
+    [pollUntilVideoReady]
+  );
+
+  const onImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files?.length) return;
     const room = MAX_PRODUCT_IMAGES - productImages.length;
@@ -94,21 +129,20 @@ export function VideoWorkflow({ apiKey, videoApiKey, videoModel }: VideoWorkflow
       return;
     }
     const count = Math.min(files.length, room);
-    const results: (string | null)[] = new Array(count);
-    let done = 0;
+    const readPromises: Promise<string>[] = [];
     for (let i = 0; i < count; i++) {
-      const reader = new FileReader();
-      const index = i;
-      reader.onload = () => {
-        results[index] = reader.result as string;
-        done++;
-        if (done === count) {
-          const ordered = results.filter((r): r is string => r != null);
-          setProductImages((prev) => [...prev, ...ordered].slice(0, MAX_PRODUCT_IMAGES));
-        }
-      };
-      reader.readAsDataURL(files[i]);
+      readPromises.push(
+        new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(files[i]);
+        })
+      );
     }
+    const raw = (await Promise.all(readPromises)).filter(Boolean);
+    const compressed = await compressImages(raw);
+    setProductImages((prev) => [...prev, ...compressed].slice(0, MAX_PRODUCT_IMAGES));
     e.target.value = '';
   };
 
@@ -125,13 +159,14 @@ export function VideoWorkflow({ apiKey, videoApiKey, videoModel }: VideoWorkflow
     setLoading(true);
     setGeneratedVideoUrl(null);
     try {
-      const data = await postVideoApi('/api/video/image2video', {
+      const url = await runVideoJob('/api/video/image2video', {
         apiKey: effectiveKey,
         model: videoModel,
         imageDataUrls: productImages,
         prompt: videoPrompt || undefined,
+        ...(videoModel.startsWith('veo-') ? { aspectRatio: veoAspectRatio } : {}),
       });
-      setGeneratedVideoUrl(data.videoUrl || data.url || null);
+      setGeneratedVideoUrl(url || null);
     } catch (e) {
       if (isAbortLike(e)) {
         setError(
@@ -154,13 +189,13 @@ export function VideoWorkflow({ apiKey, videoApiKey, videoModel }: VideoWorkflow
     setLoading(true);
     setGeneratedVideoUrl(null);
     try {
-      const data = await postVideoApi('/api/video/text2video', {
+      const url = await runVideoJob('/api/video/text2video', {
         apiKey: effectiveKey,
         model: videoModel,
         prompt: textScript,
         ...(videoModel.startsWith('veo-') ? { aspectRatio: veoAspectRatio } : {}),
       });
-      setGeneratedVideoUrl(data.videoUrl || data.url || null);
+      setGeneratedVideoUrl(url || null);
     } catch (e) {
       if (isAbortLike(e)) {
         setError(
@@ -196,7 +231,7 @@ export function VideoWorkflow({ apiKey, videoApiKey, videoModel }: VideoWorkflow
         )}
         {loading && (
           <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
-            已等待 <strong>{waitSec}</strong> 秒。视频生成通常需要 2～6 分钟，页面会一直保持「生成中」直至完成；若超过约 6 分钟仍无结果，会自动结束并提示重试。
+            已等待 <strong>{waitSec}</strong> 秒。视频采用<strong>分段轮询</strong>（每 {POLL_INTERVAL_MS / 1000} 秒查询一次），适合线上部署；通常 2～6 分钟完成。超过约 5～6 分钟无结果会提示超时重试。
           </p>
         )}
         <div className="flex gap-2 border-b border-slate-200 dark:border-slate-700 pb-2">

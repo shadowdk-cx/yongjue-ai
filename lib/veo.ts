@@ -1,4 +1,4 @@
-import { GoogleGenAI, VideoGenerationReferenceType, type Video } from '@google/genai';
+import { GoogleGenAI, VideoGenerationReferenceType, type GenerateVideosOperation, type Video } from '@google/genai';
 import { readFileSync, mkdirSync, rmSync } from 'fs';
 import { randomBytes } from 'crypto';
 import { join } from 'path';
@@ -88,15 +88,15 @@ async function veoVideoToMp4DataUrl(ai: GoogleGenAI, video: Video | undefined): 
   throw new Error(`下载生成视频失败：${raw}`);
 }
 
-/** 文生视频，返回 base64 的 data URL（video/mp4） */
-export async function generateVideoFromText(
+/** 仅提交文生视频 LRO，供异步轮询（短连接 / 网关友好） */
+export async function startVideoFromText(
   apiKey: string,
   model: string,
   prompt: string,
   config?: { aspectRatio?: '16:9' | '9:16' }
-): Promise<string> {
+): Promise<GenerateVideosOperation> {
   const ai = getClient(apiKey);
-  let operation = await withTimeout(
+  return await withTimeout(
     ai.models.generateVideos({
       model: model || 'veo-2.0-generate-001',
       prompt: prompt.trim().slice(0, 2000),
@@ -105,27 +105,119 @@ export async function generateVideoFromText(
     SINGLE_CALL_TIMEOUT_MS,
     '提交文生视频任务超时，请稍后重试'
   );
+}
+
+/** 拉取一次 Veo LRO 状态（每次 HTTP 请求只 await 一次，降低网关超时风险） */
+export async function advanceVideoOperation(
+  apiKey: string,
+  operation: GenerateVideosOperation
+): Promise<GenerateVideosOperation> {
+  const ai = getClient(apiKey);
+  return await withTimeout(
+    ai.operations.getVideosOperation({ operation }),
+    SINGLE_CALL_TIMEOUT_MS,
+    '查询视频生成进度超时，请稍后重试'
+  );
+}
+
+/**
+ * 假定 operation.done === true：校验 error、下载首段视频为 data URL
+ */
+export async function completeVideoOperationToDataUrl(
+  apiKey: string,
+  operation: GenerateVideosOperation
+): Promise<string> {
+  throwIfVideosOperationFailed(operation);
+  const ai = getClient(apiKey);
+  const video = operation.response?.generatedVideos?.[0]?.video;
+  return veoVideoToMp4DataUrl(ai, video);
+}
+
+/** 文生视频，返回 base64 的 data URL（video/mp4） */
+export async function generateVideoFromText(
+  apiKey: string,
+  model: string,
+  prompt: string,
+  config?: { aspectRatio?: '16:9' | '9:16' }
+): Promise<string> {
+  let operation = await startVideoFromText(apiKey, model, prompt, config);
 
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   while (operation.done !== true) {
     if (Date.now() > deadline) throw new Error('视频生成超时');
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-    operation = await withTimeout(
-      ai.operations.getVideosOperation({ operation }),
-      SINGLE_CALL_TIMEOUT_MS,
-      '查询视频生成进度超时，请稍后重试'
-    );
+    operation = await advanceVideoOperation(apiKey, operation);
   }
 
-  throwIfVideosOperationFailed(operation);
-
-  const video = operation.response?.generatedVideos?.[0]?.video;
-  return veoVideoToMp4DataUrl(ai, video);
+  return completeVideoOperationToDataUrl(apiKey, operation);
 }
 
 function isVeo31Family(model: string) {
   const m = (model || '').toLowerCase();
   return m.includes('veo-3.1') || m.includes('veo-3');
+}
+
+function buildImageToVideoOperationParams(
+  model: string,
+  prompt: string,
+  imageDataUrl: string | string[],
+  config?: { aspectRatio?: '16:9' | '9:16' }
+): Parameters<GoogleGenAI['models']['generateVideos']>[0] {
+  const urls = (Array.isArray(imageDataUrl) ? imageDataUrl : [imageDataUrl]).filter(
+    (u): u is string => typeof u === 'string' && u.startsWith('data:image/')
+  );
+  const images = urls.map((u) => dataUrlToImage(u)).filter(Boolean) as NonNullable<ReturnType<typeof dataUrlToImage>>[];
+  if (images.length === 0) throw new Error('请至少上传一张有效图片');
+
+  const basePrompt =
+    prompt?.trim()?.slice(0, 2000) || 'Product shot, subtle motion, professional e-commerce style.';
+  const m = model || 'veo-2.0-generate-001';
+  const aspectCfg = config?.aspectRatio ? { aspectRatio: config.aspectRatio } : undefined;
+
+  if (images.length >= 2 && isVeo31Family(m)) {
+    const refs = images.slice(0, 3).map((img) => ({
+      image: { imageBytes: img.imageBytes, mimeType: img.mimeType },
+      referenceType: VideoGenerationReferenceType.ASSET,
+    }));
+    const multiHint =
+      '【多图参考】用户上传了同一产品的多张参考图（不同角度/细节），请综合保持产品外观、材质与比例一致，生成真实可信的电商展示视频。';
+    return {
+      model: m,
+      prompt: `${multiHint}\n\n${basePrompt}`,
+      config: {
+        ...aspectCfg,
+        referenceImages: refs,
+      },
+    } as Parameters<GoogleGenAI['models']['generateVideos']>[0];
+  }
+  const single = images[0];
+  const extra =
+    images.length > 1 && !isVeo31Family(m)
+      ? `\n\n【说明】用户还提供了 ${images.length - 1} 张同产品的其它角度参考图，请在视频中尽量保持与主图一致的产品真实性。`
+      : '';
+  return {
+    model: m,
+    prompt: `${basePrompt}${extra}`,
+    image: { imageBytes: single.imageBytes, mimeType: single.mimeType },
+    config: aspectCfg,
+  } as Parameters<GoogleGenAI['models']['generateVideos']>[0];
+}
+
+/** 仅提交图生视频 LRO */
+export async function startVideoFromImage(
+  apiKey: string,
+  model: string,
+  prompt: string,
+  imageDataUrl: string | string[],
+  config?: { aspectRatio?: '16:9' | '9:16' }
+): Promise<GenerateVideosOperation> {
+  const ai = getClient(apiKey);
+  const params = buildImageToVideoOperationParams(model, prompt, imageDataUrl, config);
+  return await withTimeout(
+    ai.models.generateVideos(params),
+    SINGLE_CALL_TIMEOUT_MS,
+    '提交图生视频任务超时，请稍后重试'
+  );
 }
 
 /** 图生视频，返回 base64 的 data URL（video/mp4）。支持多张垫图：Veo 3.1 最多 3 张 referenceImages；其它模型仅用第一张。 */
@@ -136,70 +228,14 @@ export async function generateVideoFromImage(
   imageDataUrl: string | string[],
   config?: { aspectRatio?: '16:9' | '9:16' }
 ): Promise<string> {
-  const urls = (Array.isArray(imageDataUrl) ? imageDataUrl : [imageDataUrl]).filter(
-    (u): u is string => typeof u === 'string' && u.startsWith('data:image/')
-  );
-  const images = urls.map((u) => dataUrlToImage(u)).filter(Boolean) as NonNullable<ReturnType<typeof dataUrlToImage>>[];
-  if (images.length === 0) throw new Error('请至少上传一张有效图片');
-
-  const basePrompt =
-    prompt?.trim()?.slice(0, 2000) || 'Product shot, subtle motion, professional e-commerce style.';
-  const ai = getClient(apiKey);
-  const m = model || 'veo-2.0-generate-001';
-  const aspectCfg = config?.aspectRatio ? { aspectRatio: config.aspectRatio } : undefined;
-
-  let operation: Awaited<ReturnType<GoogleGenAI['models']['generateVideos']>>;
-
-  if (images.length >= 2 && isVeo31Family(m)) {
-    const refs = images.slice(0, 3).map((img) => ({
-      image: { imageBytes: img.imageBytes, mimeType: img.mimeType },
-      referenceType: VideoGenerationReferenceType.ASSET,
-    }));
-    const multiHint =
-      '【多图参考】用户上传了同一产品的多张参考图（不同角度/细节），请综合保持产品外观、材质与比例一致，生成真实可信的电商展示视频。';
-    operation = await withTimeout(
-      ai.models.generateVideos({
-        model: m,
-        prompt: `${multiHint}\n\n${basePrompt}`,
-        config: {
-          ...aspectCfg,
-          referenceImages: refs,
-        },
-      } as Parameters<GoogleGenAI['models']['generateVideos']>[0]),
-      SINGLE_CALL_TIMEOUT_MS,
-      '提交图生视频任务超时，请稍后重试'
-    );
-  } else {
-    const single = images[0];
-    const extra =
-      images.length > 1 && !isVeo31Family(m)
-        ? `\n\n【说明】用户还提供了 ${images.length - 1} 张同产品的其它角度参考图，请在视频中尽量保持与主图一致的产品真实性。`
-        : '';
-    operation = await withTimeout(
-      ai.models.generateVideos({
-        model: m,
-        prompt: `${basePrompt}${extra}`,
-        image: { imageBytes: single.imageBytes, mimeType: single.mimeType },
-        config: aspectCfg,
-      } as Parameters<GoogleGenAI['models']['generateVideos']>[0]),
-      SINGLE_CALL_TIMEOUT_MS,
-      '提交图生视频任务超时，请稍后重试'
-    );
-  }
+  let operation = await startVideoFromImage(apiKey, model, prompt, imageDataUrl, config);
 
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   while (operation.done !== true) {
     if (Date.now() > deadline) throw new Error('视频生成超时');
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-    operation = await withTimeout(
-      ai.operations.getVideosOperation({ operation }),
-      SINGLE_CALL_TIMEOUT_MS,
-      '查询视频生成进度超时，请稍后重试'
-    );
+    operation = await advanceVideoOperation(apiKey, operation);
   }
 
-  throwIfVideosOperationFailed(operation);
-
-  const video = operation.response?.generatedVideos?.[0]?.video;
-  return veoVideoToMp4DataUrl(ai, video);
+  return completeVideoOperationToDataUrl(apiKey, operation);
 }

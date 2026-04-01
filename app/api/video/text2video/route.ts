@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createTextToVideoTask, waitForTaskOutput } from '@/lib/runway';
-import { generateVideoFromText } from '@/lib/veo';
-import { persistMp4DataUrlToPublic } from '@/lib/persist-video';
+import { randomUUID } from 'crypto';
+import { createTextToVideoTask } from '@/lib/runway';
+import { startVideoFromText } from '@/lib/veo';
+import { registerVeoJob, registerRunwayJob } from '@/lib/video-jobs';
+import { formatUpstreamError } from '@/lib/format-upstream-error';
 
-export const maxDuration = 320;
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
+  const _reqStart = Date.now();
   try {
     const body = await req.json();
     const { apiKey, model = 'runway', prompt, aspectRatio } = body as {
@@ -21,11 +24,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '请填写视频描述/脚本' }, { status: 400 });
     }
 
+    const jobId = randomUUID();
+
     if (model?.startsWith('veo-')) {
       const ar = aspectRatio === '9:16' || aspectRatio === '16:9' ? aspectRatio : undefined;
-      const dataUrl = await generateVideoFromText(apiKey, model, prompt, ar ? { aspectRatio: ar } : undefined);
-      const videoUrl = persistMp4DataUrlToPublic(dataUrl);
-      return NextResponse.json({ videoUrl, url: videoUrl });
+      const operation = await startVideoFromText(
+        apiKey,
+        model,
+        prompt,
+        ar ? { aspectRatio: ar } : undefined
+      );
+      registerVeoJob(jobId, apiKey, operation);
+      return NextResponse.json({ jobId, async: true });
     }
 
     const runwayModel = model === 'runway' ? 'gen3a_turbo' : 'gen3a_turbo';
@@ -35,10 +45,13 @@ export async function POST(req: NextRequest) {
       ratio: '1280:720',
       duration: 5,
     });
-    const videoUrl = await waitForTaskOutput(apiKey, id, { intervalMs: 5000, timeoutMs: 300000 });
-    return NextResponse.json({ videoUrl, url: videoUrl });
+    registerRunwayJob(jobId, apiKey, id);
+    return NextResponse.json({ jobId, async: true });
   } catch (e) {
-    const message = e instanceof Error ? e.message : '文生视频失败';
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error(`[api/video/text2video] 耗时 ${Date.now() - _reqStart}ms`, e);
+    return NextResponse.json(
+      { error: formatUpstreamError(e, '文生视频提交') },
+      { status: 500 }
+    );
   }
 }
