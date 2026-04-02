@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Loader2, Image as ImageIcon, Video, Upload, Plus, Trash2 } from 'lucide-react';
+import { Loader2, Image as ImageIcon, Video, Upload, Plus, Trash2, Square } from 'lucide-react';
 import { compressImages } from '@/lib/compress-image';
 
 type VideoWorkflowProps = { apiKey: string; videoApiKey: string; videoModel: string };
@@ -168,13 +168,8 @@ export function VideoWorkflow({ apiKey, videoApiKey, videoModel }: VideoWorkflow
       });
       setGeneratedVideoUrl(url || null);
     } catch (e) {
-      if (isAbortLike(e)) {
-        setError(
-          '请求超时或连接中断（视频接口常需数分钟）。请直接再点「生成视频」重试；若反复出现，检查网络或稍后再试。'
-        );
-      } else {
-        setError(e instanceof Error ? e.message : '图生视频失败');
-      }
+      if (isAbortLike(e)) return;
+      setError(e instanceof Error ? e.message : '图生视频失败');
     } finally {
       setLoading(false);
     }
@@ -197,17 +192,19 @@ export function VideoWorkflow({ apiKey, videoApiKey, videoModel }: VideoWorkflow
       });
       setGeneratedVideoUrl(url || null);
     } catch (e) {
-      if (isAbortLike(e)) {
-        setError(
-          '请求超时或连接中断（视频接口常需数分钟）。请直接再点「生成视频」重试；若反复出现，检查网络或稍后再试。'
-        );
-      } else {
-        setError(e instanceof Error ? e.message : '文生视频失败');
-      }
+      if (isAbortLike(e)) return;
+      setError(e instanceof Error ? e.message : '文生视频失败');
     } finally {
       setLoading(false);
     }
   };
+
+  const stopGeneration = useCallback(() => {
+    videoAbortRef.current?.abort();
+    videoAbortRef.current = null;
+    setLoading(false);
+    setError('已停止生成');
+  }, []);
 
   return (
     <div className="flex-1 overflow-auto p-4">
@@ -342,15 +339,33 @@ export function VideoWorkflow({ apiKey, videoApiKey, videoModel }: VideoWorkflow
                 </div>
               </div>
               <div>
-                <button
-                  type="button"
-                  onClick={runImage2Video}
-                  disabled={loading}
-                  className="w-full py-3 rounded-lg bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-50 flex items-center justify-center gap-2 mb-4"
-                >
-                  {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Video className="w-5 h-5" />}
-                  {loading ? '生成中…' : '生成视频'}
-                </button>
+                {loading ? (
+                  <div className="flex gap-2 mb-4">
+                    <button
+                      type="button"
+                      disabled
+                      className="flex-1 py-3 rounded-lg bg-sky-500/70 text-white flex items-center justify-center gap-2 cursor-not-allowed"
+                    >
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      生成中… {waitSec > 0 && `(${waitSec}s)`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopGeneration}
+                      className="px-5 py-3 rounded-lg bg-red-500 text-white hover:bg-red-600 flex items-center justify-center gap-2"
+                    >
+                      <Square className="w-4 h-4" /> 停止
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={runImage2Video}
+                    className="w-full py-3 rounded-lg bg-sky-500 text-white hover:bg-sky-600 flex items-center justify-center gap-2 mb-4"
+                  >
+                    <Video className="w-5 h-5" /> 生成视频
+                  </button>
+                )}
                 {generatedVideoUrl && (
                   <div>
                     <label className="block text-xs text-slate-500 mb-2">生成结果</label>
@@ -377,15 +392,33 @@ export function VideoWorkflow({ apiKey, videoApiKey, videoModel }: VideoWorkflow
                   className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
                 />
               </div>
-              <button
-                type="button"
-                onClick={runText2Video}
-                disabled={loading}
-                className="w-full py-3 rounded-lg bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Video className="w-5 h-5" />}
-                {loading ? '生成中…' : '生成视频'}
-              </button>
+              {loading ? (
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled
+                    className="flex-1 py-3 rounded-lg bg-sky-500/70 text-white flex items-center justify-center gap-2 cursor-not-allowed"
+                  >
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    生成中… {waitSec > 0 && `(${waitSec}s)`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={stopGeneration}
+                    className="px-5 py-3 rounded-lg bg-red-500 text-white hover:bg-red-600 flex items-center justify-center gap-2"
+                  >
+                    <Square className="w-4 h-4" /> 停止
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={runText2Video}
+                  className="w-full py-3 rounded-lg bg-sky-500 text-white hover:bg-sky-600 flex items-center justify-center gap-2"
+                >
+                  <Video className="w-5 h-5" /> 生成视频
+                </button>
+              )}
               {generatedVideoUrl && (
                 <div>
                   <label className="block text-xs text-slate-500 mb-2">生成结果</label>
