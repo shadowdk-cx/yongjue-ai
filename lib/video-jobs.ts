@@ -9,11 +9,7 @@ type RawLroResponse = {
   name?: string;
   done?: boolean;
   error?: { code?: number; message?: string };
-  response?: {
-    generateVideoResponse?: {
-      generatedSamples?: Array<{ video?: { uri?: string } }>;
-    };
-  };
+  response?: Record<string, unknown>;
 };
 
 /**
@@ -44,6 +40,17 @@ type RunwayJob = { kind: 'runway'; apiKey: string; taskId: string; created: numb
 
 type Terminal = { videoUrl: string } | { error: string };
 type ReadyToStream = { googleUri: string; apiKey: string };
+
+/**
+ * 从 Veo REST 响应中深度提取视频 URI，兼容多种可能的嵌套结构。
+ * Google 不同版本/模型的 response 字段名可能不一致。
+ */
+function extractVideoUri(response: Record<string, unknown> | undefined): string | undefined {
+  if (!response) return undefined;
+  const json = JSON.stringify(response);
+  const match = json.match(/"uri"\s*:\s*"(https:\/\/[^"]+)"/);
+  return match?.[1];
+}
 
 type JobStore = {
   pending: Map<string, VeoJob | RunwayJob>;
@@ -180,11 +187,12 @@ export async function pollVideoJob(jobId: string): Promise<
       return { status: 'error', message: `Veo 任务失败：${msg}` };
     }
 
-    const samples = raw.response?.generateVideoResponse?.generatedSamples;
-    const uri = samples?.[0]?.video?.uri;
+    const uri = extractVideoUri(raw.response);
     if (!uri) {
+      const snippet = JSON.stringify(raw.response || raw).slice(0, 500);
+      console.error(`[video-job ${jobId.slice(0, 8)}] done=true 但无视频 URI, 原始响应:`, snippet);
       pending.delete(jobId);
-      const msg = 'Veo 完成但未返回视频 URI';
+      const msg = `Veo 完成但未返回视频，可能被内容安全审核拦截。原始: ${snippet.slice(0, 200)}`;
       done.set(jobId, { error: msg });
       return { status: 'error', message: msg };
     }
