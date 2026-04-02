@@ -107,6 +107,8 @@ export async function startVideoFromText(
   );
 }
 
+const ADVANCE_TIMEOUT_MS = 30_000;
+
 /** 拉取一次 Veo LRO 状态（每次 HTTP 请求只 await 一次，降低网关超时风险） */
 export async function advanceVideoOperation(
   apiKey: string,
@@ -115,8 +117,8 @@ export async function advanceVideoOperation(
   const ai = getClient(apiKey);
   return await withTimeout(
     ai.operations.getVideosOperation({ operation }),
-    SINGLE_CALL_TIMEOUT_MS,
-    '查询视频生成进度超时，请稍后重试'
+    ADVANCE_TIMEOUT_MS,
+    '查询视频生成进度超时（30s），将在下次轮询重试'
   );
 }
 

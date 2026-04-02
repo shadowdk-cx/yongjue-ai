@@ -17,8 +17,28 @@ type RunwayJob = { kind: 'runway'; apiKey: string; taskId: string; created: numb
 
 type Terminal = { videoUrl: string } | { error: string };
 
-const pending = new Map<string, VeoJob | RunwayJob>();
-const done = new Map<string, Terminal>();
+type JobStore = {
+  pending: Map<string, VeoJob | RunwayJob>;
+  done: Map<string, Terminal>;
+};
+
+/**
+ * 用 globalThis 持久化任务 Map，避免 Next.js dev 模式下
+ * 按需编译不同 API 路由时模块被重新实例化、内存状态丢失。
+ */
+const STORE_KEY = '__yongjue_video_jobs__';
+function getStore(): JobStore {
+  const g = globalThis as unknown as Record<string, JobStore | undefined>;
+  if (!g[STORE_KEY]) {
+    g[STORE_KEY] = {
+      pending: new Map(),
+      done: new Map(),
+    };
+  }
+  return g[STORE_KEY]!;
+}
+
+const { pending, done } = getStore();
 
 function pruneStale() {
   const now = Date.now();
@@ -85,11 +105,19 @@ export async function pollVideoJob(jobId: string): Promise<
 
   if (job.kind === 'veo') {
     let op = job.operation;
+    const elapsedSec = Math.floor((Date.now() - job.created) / 1000);
     if (op.done !== true) {
       try {
+        console.log(`[video-job ${jobId.slice(0, 8)}] veo poll @ ${elapsedSec}s, op.name=${op.name}, op.done=${op.done}`);
         op = await advanceVideoOperation(job.apiKey, op);
+        console.log(`[video-job ${jobId.slice(0, 8)}] veo poll result: done=${op.done}`);
       } catch (e) {
         const message = e instanceof Error ?  e.message : String(e);
+        const isTransient = /超时|timeout|aborted|ECONNRESET|fetch failed/i.test(message);
+        console.warn(`[video-job ${jobId.slice(0, 8)}] veo poll error @ ${elapsedSec}s (transient=${isTransient}):`, message);
+        if (isTransient) {
+          return { status: 'pending' };
+        }
         pending.delete(jobId);
         done.set(jobId, { error: message });
         return { status: 'error', message };
