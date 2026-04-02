@@ -43,13 +43,27 @@ type ReadyToStream = { googleUri: string; apiKey: string };
 
 /**
  * 从 Veo REST 响应中深度提取视频 URI，兼容多种可能的嵌套结构。
- * Google 不同版本/模型的 response 字段名可能不一致。
  */
 function extractVideoUri(response: Record<string, unknown> | undefined): string | undefined {
   if (!response) return undefined;
   const json = JSON.stringify(response);
   const match = json.match(/"uri"\s*:\s*"(https:\/\/[^"]+)"/);
   return match?.[1];
+}
+
+/**
+ * 检测 Google 内容安全过滤，返回过滤原因（如果有）。
+ * Veo 被拦截时响应包含 isMediaFilteredCount / aiMediaFilteredReasons 字段。
+ */
+function detectContentFilter(response: Record<string, unknown> | undefined): string | undefined {
+  if (!response) return undefined;
+  const json = JSON.stringify(response);
+  if (/isMediaFilteredCount|aiMediaFilteredReasons|mediaFilteredCount|filteredReasons/i.test(json)) {
+    const reasonMatch = json.match(/"(?:aiMediaFilteredReasons|filteredReasons)"\s*:\s*\[([^\]]*)\]/);
+    const reasons = reasonMatch?.[1]?.replace(/"/g, '').trim() || '未知原因';
+    return reasons;
+  }
+  return undefined;
 }
 
 type JobStore = {
@@ -188,11 +202,17 @@ export async function pollVideoJob(jobId: string): Promise<
     }
 
     const uri = extractVideoUri(raw.response);
+    const filtered = detectContentFilter(raw.response);
     if (!uri) {
-      const snippet = JSON.stringify(raw.response || raw).slice(0, 500);
-      console.error(`[video-job ${jobId.slice(0, 8)}] done=true 但无视频 URI, 原始响应:`, snippet);
       pending.delete(jobId);
-      const msg = `Veo 完成但未返回视频，可能被内容安全审核拦截。原始: ${snippet.slice(0, 200)}`;
+      let msg: string;
+      if (filtered) {
+        msg = `⚠️ 视频被 Google 内容安全审核拦截：${filtered}\n\n建议：\n• 换用英文提示词（如 "Product showcase, rotating slowly"）\n• 尝试切换为 Veo 2.0 模型\n• 更换产品图片重试`;
+      } else {
+        const snippet = JSON.stringify(raw.response || raw).slice(0, 300);
+        console.error(`[video-job ${jobId.slice(0, 8)}] done=true 但无视频 URI, 原始:`, snippet);
+        msg = `Veo 完成但未返回视频 URI，请重试或更换模型。`;
+      }
       done.set(jobId, { error: msg });
       return { status: 'error', message: msg };
     }
