@@ -1,9 +1,5 @@
 import type { GenerateVideosOperation } from '@google/genai';
 import { getTask } from '@/lib/runway';
-import {
-  completeVideoOperationToDataUrl,
-} from '@/lib/veo';
-import { persistMp4DataUrlToPublic } from '@/lib/persist-video';
 import { withTimeout } from '@/lib/fetch-timeout';
 
 const RUNWAY_POLL_TIMEOUT_MS = 90_000;
@@ -25,7 +21,7 @@ type RawLroResponse = {
  */
 async function pollVeoRest(apiKey: string, operationName: string): Promise<RawLroResponse> {
   const url = `https://generativelanguage.googleapis.com/v1beta/${operationName}?key=${encodeURIComponent(apiKey)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(VEO_POLL_TIMEOUT_MS) });
+  const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(VEO_POLL_TIMEOUT_MS) });
   const body = await res.text();
   if (!res.ok) {
     throw new Error(`查询 Veo 任务失败（HTTP ${res.status}）：${body.slice(0, 300)}`);
@@ -47,10 +43,12 @@ type VeoJob = { kind: 'veo'; apiKey: string; operation: GenerateVideosOperation;
 type RunwayJob = { kind: 'runway'; apiKey: string; taskId: string; created: number };
 
 type Terminal = { videoUrl: string } | { error: string };
+type ReadyToStream = { googleUri: string; apiKey: string };
 
 type JobStore = {
   pending: Map<string, VeoJob | RunwayJob>;
   done: Map<string, Terminal>;
+  stream: Map<string, ReadyToStream>;
 };
 
 /**
@@ -64,12 +62,16 @@ function getStore(): JobStore {
     g[STORE_KEY] = {
       pending: new Map(),
       done: new Map(),
+      stream: new Map(),
     };
+  }
+  if (!g[STORE_KEY]!.stream) {
+    g[STORE_KEY]!.stream = new Map();
   }
   return g[STORE_KEY]!;
 }
 
-const { pending, done } = getStore();
+const { pending, done, stream } = getStore();
 
 function pruneStale() {
   const now = Date.now();
@@ -82,6 +84,11 @@ function pruneStale() {
 export function registerVeoJob(jobId: string, apiKey: string, operation: GenerateVideosOperation) {
   pruneStale();
   pending.set(jobId, { kind: 'veo', apiKey, operation, created: Date.now() });
+}
+
+/** 获取已就绪的 Google 视频 URI（供流式代理路由使用） */
+export function getStreamInfo(jobId: string): ReadyToStream | undefined {
+  return stream.get(jobId);
 }
 
 export function registerRunwayJob(jobId: string, apiKey: string, taskId: string) {
@@ -173,32 +180,21 @@ export async function pollVideoJob(jobId: string): Promise<
       return { status: 'error', message: `Veo 任务失败：${msg}` };
     }
 
-    try {
-      const samples = raw.response?.generateVideoResponse?.generatedSamples;
-      const uri = samples?.[0]?.video?.uri;
-      if (!uri) throw new Error('Veo 完成但未返回视频 URI');
-
-      const mutOp = op as unknown as Record<string, unknown>;
-      mutOp.done = true;
-      mutOp.response = {
-        generatedVideos: (samples || []).map((s) => ({
-          video: { uri: s.video?.uri },
-        })),
-      };
-
-      const dataUrl = await completeVideoOperationToDataUrl(job.apiKey, op);
-      const videoUrl = persistMp4DataUrlToPublic(dataUrl);
+    const samples = raw.response?.generateVideoResponse?.generatedSamples;
+    const uri = samples?.[0]?.video?.uri;
+    if (!uri) {
       pending.delete(jobId);
-      done.set(jobId, { videoUrl });
-      console.log(`[video-job ${jobId.slice(0, 8)}] 视频就绪: ${videoUrl}`);
-      return { status: 'done', videoUrl };
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      console.error(`[video-job ${jobId.slice(0, 8)}] 下载/落盘失败:`, message);
-      pending.delete(jobId);
-      done.set(jobId, { error: message });
-      return { status: 'error', message };
+      const msg = 'Veo 完成但未返回视频 URI';
+      done.set(jobId, { error: msg });
+      return { status: 'error', message: msg };
     }
+
+    const videoUrl = `/api/video/stream/${jobId}`;
+    stream.set(jobId, { googleUri: uri, apiKey: job.apiKey });
+    pending.delete(jobId);
+    done.set(jobId, { videoUrl });
+    console.log(`[video-job ${jobId.slice(0, 8)}] 视频就绪, 流式代理: ${videoUrl}`);
+    return { status: 'done', videoUrl };
   }
 
   try {
