@@ -1,5 +1,6 @@
 import type { GenerateVideosOperation } from '@google/genai';
 import { getTask } from '@/lib/runway';
+import { startVideoFromText, startVideoFromImage } from '@/lib/veo';
 import { withTimeout } from '@/lib/fetch-timeout';
 
 const RUNWAY_POLL_TIMEOUT_MS = 90_000;
@@ -35,7 +36,26 @@ async function pollVeoRest(apiKey: string, operationName: string): Promise<RawLr
 /** 自创建时刻起，允许轮询的最长时间（与原先单请求轮询上限一致） */
 const JOB_DEADLINE_MS = 300_000;
 
-type VeoJob = { kind: 'veo'; apiKey: string; operation: GenerateVideosOperation; created: number };
+type VeoRetryParams = {
+  type: 'text';
+  prompt: string;
+  config?: { aspectRatio?: '16:9' | '9:16' };
+} | {
+  type: 'image';
+  prompt: string;
+  imageDataUrl: string | string[];
+  config?: { aspectRatio?: '16:9' | '9:16' };
+};
+
+type VeoJob = {
+  kind: 'veo';
+  apiKey: string;
+  operation: GenerateVideosOperation;
+  created: number;
+  model: string;
+  retryParams?: VeoRetryParams;
+  retriedWithFallback?: boolean;
+};
 type RunwayJob = { kind: 'runway'; apiKey: string; taskId: string; created: number };
 
 type Terminal = { videoUrl: string } | { error: string };
@@ -102,9 +122,15 @@ function pruneStale() {
   });
 }
 
-export function registerVeoJob(jobId: string, apiKey: string, operation: GenerateVideosOperation) {
+export function registerVeoJob(
+  jobId: string,
+  apiKey: string,
+  operation: GenerateVideosOperation,
+  model: string,
+  retryParams?: VeoRetryParams
+) {
   pruneStale();
-  pending.set(jobId, { kind: 'veo', apiKey, operation, created: Date.now() });
+  pending.set(jobId, { kind: 'veo', apiKey, operation, created: Date.now(), model, retryParams });
 }
 
 /** 获取已就绪的 Google 视频 URI（供流式代理路由使用） */
@@ -204,10 +230,35 @@ export async function pollVideoJob(jobId: string): Promise<
     const uri = extractVideoUri(raw.response);
     const filtered = detectContentFilter(raw.response);
     if (!uri) {
+      const canRetry = filtered && !job.retriedWithFallback && job.retryParams;
+      if (canRetry) {
+        const fallbackModel = 'veo-2.0-generate-001';
+        console.warn(`[video-job ${jobId.slice(0, 8)}] ${job.model} 被内容过滤，自动降级 ${fallbackModel} 重试...`);
+        try {
+          let newOp: GenerateVideosOperation;
+          if (job.retryParams!.type === 'text') {
+            newOp = await startVideoFromText(job.apiKey, fallbackModel, job.retryParams!.prompt, job.retryParams!.config);
+          } else {
+            newOp = await startVideoFromImage(job.apiKey, fallbackModel, job.retryParams!.prompt, job.retryParams!.imageDataUrl, job.retryParams!.config);
+          }
+          pending.set(jobId, {
+            ...job,
+            model: fallbackModel,
+            operation: newOp,
+            retriedWithFallback: true,
+            created: Date.now(),
+          });
+          console.log(`[video-job ${jobId.slice(0, 8)}] 已降级到 ${fallbackModel}，继续轮询`);
+          return { status: 'pending' };
+        } catch (retryErr) {
+          console.error(`[video-job ${jobId.slice(0, 8)}] 降级重试失败:`, retryErr);
+        }
+      }
+
       pending.delete(jobId);
       let msg: string;
       if (filtered) {
-        msg = `⚠️ 视频被 Google 内容安全审核拦截：${filtered}\n\n建议：\n• 换用英文提示词（如 "Product showcase, rotating slowly"）\n• 尝试切换为 Veo 2.0 模型\n• 更换产品图片重试`;
+        msg = `⚠️ 视频被 Google 内容安全审核拦截：${filtered}\n\n建议：换用英文提示词、更换产品图片重试`;
       } else {
         const snippet = JSON.stringify(raw.response || raw).slice(0, 300);
         console.error(`[video-job ${jobId.slice(0, 8)}] done=true 但无视频 URI, 原始:`, snippet);

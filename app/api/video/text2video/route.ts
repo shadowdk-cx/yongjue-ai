@@ -4,6 +4,7 @@ import { createTextToVideoTask } from '@/lib/runway';
 import { startVideoFromText } from '@/lib/veo';
 import { registerVeoJob, registerRunwayJob } from '@/lib/video-jobs';
 import { formatUpstreamError } from '@/lib/format-upstream-error';
+import { translatePromptToEnglish } from '@/lib/translate-prompt';
 
 export const maxDuration = 300;
 
@@ -28,13 +29,12 @@ export async function POST(req: NextRequest) {
 
     if (model?.startsWith('veo-')) {
       const ar = aspectRatio === '9:16' || aspectRatio === '16:9' ? aspectRatio : undefined;
-      const operation = await startVideoFromText(
-        apiKey,
-        model,
-        prompt,
-        ar ? { aspectRatio: ar } : undefined
-      );
-      registerVeoJob(jobId, apiKey, operation);
+      const enPrompt = await translatePromptToEnglish(apiKey, prompt);
+      const config = ar ? { aspectRatio: ar as '16:9' | '9:16' } : undefined;
+      const operation = await startVideoFromText(apiKey, model, enPrompt, config);
+      registerVeoJob(jobId, apiKey, operation, model, {
+        type: 'text', prompt: enPrompt, config,
+      });
       return NextResponse.json({ jobId, async: true });
     }
 

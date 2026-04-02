@@ -4,6 +4,7 @@ import { createImageToVideoTask } from '@/lib/runway';
 import { startVideoFromImage } from '@/lib/veo';
 import { registerVeoJob, registerRunwayJob } from '@/lib/video-jobs';
 import { formatUpstreamError } from '@/lib/format-upstream-error';
+import { translatePromptToEnglish } from '@/lib/translate-prompt';
 
 /** 首段仅提交任务，真正轮询在 GET /api/video/job/[id]，避免 Zeabur/反向代理长连接超时 */
 export const maxDuration = 300;
@@ -33,14 +34,14 @@ export async function POST(req: NextRequest) {
 
     if (model?.startsWith('veo-')) {
       const ar = aspectRatio === '9:16' || aspectRatio === '16:9' ? aspectRatio : undefined;
-      const operation = await startVideoFromImage(
-        apiKey,
-        model,
-        prompt || 'Product shot, subtle motion, professional e-commerce style.',
-        urls.length === 1 ? urls[0] : urls.slice(0, 3),
-        ar ? { aspectRatio: ar } : undefined
-      );
-      registerVeoJob(jobId, apiKey, operation);
+      const rawPrompt = prompt || 'Product shot, subtle motion, professional e-commerce style.';
+      const enPrompt = await translatePromptToEnglish(apiKey, rawPrompt);
+      const imageInput = urls.length === 1 ? urls[0] : urls.slice(0, 3);
+      const config = ar ? { aspectRatio: ar as '16:9' | '9:16' } : undefined;
+      const operation = await startVideoFromImage(apiKey, model, enPrompt, imageInput, config);
+      registerVeoJob(jobId, apiKey, operation, model, {
+        type: 'image', prompt: enPrompt, imageDataUrl: imageInput, config,
+      });
       return NextResponse.json({ jobId, async: true });
     }
 
