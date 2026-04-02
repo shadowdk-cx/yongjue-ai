@@ -1,13 +1,44 @@
 import type { GenerateVideosOperation } from '@google/genai';
 import { getTask } from '@/lib/runway';
 import {
-  advanceVideoOperation,
   completeVideoOperationToDataUrl,
 } from '@/lib/veo';
 import { persistMp4DataUrlToPublic } from '@/lib/persist-video';
 import { withTimeout } from '@/lib/fetch-timeout';
 
 const RUNWAY_POLL_TIMEOUT_MS = 90_000;
+const VEO_POLL_TIMEOUT_MS = 30_000;
+
+type RawLroResponse = {
+  name?: string;
+  done?: boolean;
+  error?: { code?: number; message?: string };
+  response?: {
+    generateVideoResponse?: {
+      generatedSamples?: Array<{ video?: { uri?: string } }>;
+    };
+  };
+};
+
+/**
+ * 直接调 REST API 查 Veo LRO 状态，绕过 SDK bug（v1.45 getVideosOperation 始终返回 done=undefined）
+ */
+async function pollVeoRest(apiKey: string, operationName: string): Promise<RawLroResponse> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/${operationName}?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(VEO_POLL_TIMEOUT_MS) });
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`查询 Veo 任务失败（HTTP ${res.status}）：${body.slice(0, 300)}`);
+  }
+  if (process.env.NODE_ENV === 'development') {
+    console.log(`[pollVeoRest] status=${res.status} bodyLen=${body.length}`);
+  }
+  try {
+    return JSON.parse(body) as RawLroResponse;
+  } catch {
+    throw new Error(`Veo REST 返回非 JSON: ${body.slice(0, 200)}`);
+  }
+}
 
 /** 自创建时刻起，允许轮询的最长时间（与原先单请求轮询上限一致） */
 const JOB_DEADLINE_MS = 300_000;
@@ -104,39 +135,66 @@ export async function pollVideoJob(jobId: string): Promise<
   }
 
   if (job.kind === 'veo') {
-    let op = job.operation;
+    const op = job.operation;
     const elapsedSec = Math.floor((Date.now() - job.created) / 1000);
-    if (op.done !== true) {
-      try {
-        console.log(`[video-job ${jobId.slice(0, 8)}] veo poll @ ${elapsedSec}s, op.name=${op.name}, op.done=${op.done}`);
-        op = await advanceVideoOperation(job.apiKey, op);
-        console.log(`[video-job ${jobId.slice(0, 8)}] veo poll result: done=${op.done}`);
-      } catch (e) {
-        const message = e instanceof Error ?  e.message : String(e);
-        const isTransient = /超时|timeout|aborted|ECONNRESET|fetch failed/i.test(message);
-        console.warn(`[video-job ${jobId.slice(0, 8)}] veo poll error @ ${elapsedSec}s (transient=${isTransient}):`, message);
-        if (isTransient) {
-          return { status: 'pending' };
-        }
-        pending.delete(jobId);
-        done.set(jobId, { error: message });
-        return { status: 'error', message };
-      }
-      pending.set(jobId, { ...job, operation: op });
+    const opName = op.name;
+    if (!opName) {
+      pending.delete(jobId);
+      const msg = 'Veo operation 缺少 name，无法轮询';
+      done.set(jobId, { error: msg });
+      return { status: 'error', message: msg };
     }
 
-    if (op.done !== true) {
+    let raw: RawLroResponse;
+    try {
+      console.log(`[video-job ${jobId.slice(0, 8)}] REST poll @ ${elapsedSec}s, name=${opName}`);
+      raw = await pollVeoRest(job.apiKey, opName);
+      console.log(`[video-job ${jobId.slice(0, 8)}] REST result: done=${raw.done}`);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      const isTransient = /超时|timeout|aborted|ECONNRESET|fetch failed/i.test(message);
+      console.warn(`[video-job ${jobId.slice(0, 8)}] REST poll error @ ${elapsedSec}s (transient=${isTransient}):`, message);
+      if (isTransient) {
+        return { status: 'pending' };
+      }
+      pending.delete(jobId);
+      done.set(jobId, { error: message });
+      return { status: 'error', message };
+    }
+
+    if (raw.done !== true) {
       return { status: 'pending' };
     }
 
+    if (raw.error) {
+      const msg = raw.error.message || JSON.stringify(raw.error);
+      pending.delete(jobId);
+      done.set(jobId, { error: `Veo 任务失败：${msg}` });
+      return { status: 'error', message: `Veo 任务失败：${msg}` };
+    }
+
     try {
+      const samples = raw.response?.generateVideoResponse?.generatedSamples;
+      const uri = samples?.[0]?.video?.uri;
+      if (!uri) throw new Error('Veo 完成但未返回视频 URI');
+
+      const mutOp = op as unknown as Record<string, unknown>;
+      mutOp.done = true;
+      mutOp.response = {
+        generatedVideos: (samples || []).map((s) => ({
+          video: { uri: s.video?.uri },
+        })),
+      };
+
       const dataUrl = await completeVideoOperationToDataUrl(job.apiKey, op);
       const videoUrl = persistMp4DataUrlToPublic(dataUrl);
       pending.delete(jobId);
       done.set(jobId, { videoUrl });
+      console.log(`[video-job ${jobId.slice(0, 8)}] 视频就绪: ${videoUrl}`);
       return { status: 'done', videoUrl };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      console.error(`[video-job ${jobId.slice(0, 8)}] 下载/落盘失败:`, message);
       pending.delete(jobId);
       done.set(jobId, { error: message });
       return { status: 'error', message };

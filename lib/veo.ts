@@ -109,17 +109,63 @@ export async function startVideoFromText(
 
 const ADVANCE_TIMEOUT_MS = 30_000;
 
+type RawLroResponse = {
+  name?: string;
+  done?: boolean;
+  error?: { code?: number; message?: string };
+  response?: {
+    generateVideoResponse?: {
+      generatedSamples?: Array<{ video?: { uri?: string } }>;
+    };
+  };
+};
+
+/**
+ * 绕过 SDK `getVideosOperation`（v1.45 有 bug：始终返回 done=undefined），
+ * 直接调用 REST API 查询 LRO 状态。
+ */
+async function pollOperationRaw(apiKey: string, operationName: string): Promise<RawLroResponse> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/${operationName}?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(ADVANCE_TIMEOUT_MS) });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`查询 Veo 任务失败（HTTP ${res.status}）：${text.slice(0, 300)}`);
+  }
+  return (await res.json()) as RawLroResponse;
+}
+
 /** 拉取一次 Veo LRO 状态（每次 HTTP 请求只 await 一次，降低网关超时风险） */
 export async function advanceVideoOperation(
   apiKey: string,
   operation: GenerateVideosOperation
 ): Promise<GenerateVideosOperation> {
-  const ai = getClient(apiKey);
-  return await withTimeout(
-    ai.operations.getVideosOperation({ operation }),
-    ADVANCE_TIMEOUT_MS,
-    '查询视频生成进度超时（30s），将在下次轮询重试'
-  );
+  const opName = operation.name;
+  if (!opName) {
+    throw new Error('Veo operation 缺少 name，无法轮询');
+  }
+
+  const raw = await pollOperationRaw(apiKey, opName);
+
+  if (raw.done === true) {
+    if (raw.error) {
+      const msg = raw.error.message || JSON.stringify(raw.error);
+      throw new Error(`Veo 任务失败：${msg}`);
+    }
+    const samples = raw.response?.generateVideoResponse?.generatedSamples;
+    const uri = samples?.[0]?.video?.uri;
+    const op = operation as unknown as Record<string, unknown>;
+    op.done = true;
+    if (uri && !op.response) {
+      op.response = {
+        generatedVideos: (samples || []).map((s) => ({
+          video: { uri: s.video?.uri },
+        })),
+      };
+    }
+    return operation;
+  }
+
+  return operation;
 }
 
 /**
