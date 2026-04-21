@@ -8,10 +8,10 @@ const HomeFull = dynamic(() => import('@/components/HomeFull'), {
   ssr: false,
   loading: () => (
     <div className="min-h-screen flex flex-col items-center justify-center gap-3 bg-slate-50 text-slate-600 px-6">
-      <p className="text-base font-medium text-slate-800">正在加载工具…</p>
+      <p className="text-base font-medium text-slate-800">Loading… / 正在加载…</p>
       <p className="text-sm text-center max-w-md">
-        若一直停在此页，请按键盘 <kbd className="px-1 rounded bg-slate-200 text-slate-800">F12</kbd> 或
-        <kbd className="px-1 rounded bg-slate-200 text-slate-800">⌥⌘I</kbd> 打开开发者工具 → 点「Console」查看红色报错。
+        If stuck, press <kbd className="px-1 rounded bg-slate-200 text-slate-800">F12</kbd> or
+        <kbd className="px-1 rounded bg-slate-200 text-slate-800">⌥⌘I</kbd> to open DevTools → Console.
       </p>
     </div>
   ),

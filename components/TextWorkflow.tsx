@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Loader2, Save, Trash2, Sparkles, Clock, ChevronDown, ChevronUp, X } from 'lucide-react';
+import { useI18n } from '@/lib/i18n';
 
-type TextWorkflowProps = { apiKey: string; provider: 'gemini' | 'openai'; textModel: string };
+type TextWorkflowProps = { apiKey: string; provider: 'gemini' | 'openai' | 'qwen' | 'openrouter' | 'detaler'; textModel: string };
 
 const DEFAULT_TITLE_PROMPT_EN = `你是一位跨境电商SEO专家。根据以下产品信息，生成符合亚马逊/独立站规范的英文产品标题。要求：包含核心关键词、卖点词、控制在80-200字符、无夸大违禁词。`;
 const DEFAULT_TITLE_PROMPT_ZH = `根据产品信息，生成符合国内电商/抖音或亚马逊中文站的产品标题。要求：包含核心关键词、卖点词、简洁有力、无夸大违禁词。`;
@@ -42,6 +43,7 @@ function saveHistory(items: HistoryItem[]) {
 }
 
 export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps) {
+  const { t, locale } = useI18n();
   const [titlePrompt, setTitlePrompt] = useState(DEFAULT_TITLE_PROMPT_EN);
   const [bulletPrompt, setBulletPrompt] = useState(DEFAULT_BULLET_PROMPT_EN);
   const [descPrompt, setDescPrompt] = useState(DEFAULT_DESC_PROMPT_EN);
@@ -64,7 +66,7 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
   const addToHistory = useCallback((title: string, bullets: string, description: string, fields?: Record<string, string>) => {
     const item: HistoryItem = {
       id: Date.now().toString(),
-      time: new Date().toLocaleString('zh-CN'),
+      time: new Date().toLocaleString(locale === 'en' ? 'en-US' : 'zh-CN'),
       platform,
       language,
       input: [originalTitle, originalBullets, originalDesc].filter(Boolean).join(' | ').slice(0, 80),
@@ -76,7 +78,7 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
     const next = [item, ...history].slice(0, 50);
     setHistory(next);
     saveHistory(next);
-  }, [history, platform, language, originalTitle, originalBullets, originalDesc]);
+  }, [history, platform, language, originalTitle, originalBullets, originalDesc, locale]);
 
   const restoreFromHistory = (item: HistoryItem) => {
     setOptimizedTitle(item.title);
@@ -105,7 +107,7 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
 
   const runParse = async () => {
     if (!apiKey || !rawProductInfo.trim()) {
-      setError('请填写 API Key 和至少一项产品信息');
+      setError(t('请填写 API Key 和至少一项产品信息', 'Please enter API Key and at least one product field'));
       return;
     }
     setError(null);
@@ -117,10 +119,10 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
         body: JSON.stringify({ apiKey, provider, model: textModel, productInfo: rawProductInfo }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '解析失败');
+      if (!res.ok) throw new Error(data.error || t('解析失败', 'Parse failed'));
       setParsedFields(data.fields || {});
     } catch (e) {
-      setError(e instanceof Error ? e.message : '解析失败');
+      setError(e instanceof Error ? e.message : t('解析失败', 'Parse failed'));
     } finally {
       setLoading(false);
     }
@@ -128,7 +130,7 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
 
   const runGenerate = async () => {
     if (!apiKey || !rawProductInfo.trim()) {
-      setError('请填写 API Key 和至少一项产品信息');
+      setError(t('请填写 API Key 和至少一项产品信息', 'Please enter API Key and at least one product field'));
       return;
     }
     setError(null);
@@ -144,13 +146,13 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '生成失败');
+      if (!res.ok) throw new Error(data.error || t('生成失败', 'Generation failed'));
       setOptimizedTitle(data.title || '');
       setOptimizedBullets(data.bullets || '');
       setOptimizedDesc(data.description || '');
       addToHistory(data.title || '', data.bullets || '', data.description || '', parsedFields);
     } catch (e) {
-      setError(e instanceof Error ? e.message : '生成失败');
+      setError(e instanceof Error ? e.message : t('生成失败', 'Generation failed'));
     } finally {
       setLoading(false);
     }
@@ -175,54 +177,71 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [language]);
 
-  const platformLabel = (p: string) => p === 'amazon' ? '亚马逊' : p === 'douyin' ? '抖音/国内' : '独立站';
+  const platformLabel = (p: string) =>
+    p === 'amazon'
+      ? t('亚马逊', 'Amazon')
+      : p === 'douyin'
+        ? t('抖音/国内', 'Douyin / domestic')
+        : t('独立站', 'Standalone store');
+
+  const parsedFieldRows: [string, string][] = [
+    ['productTitle', t('产品标题', 'Product title')],
+    ['functionalSellingPoints', t('功能卖点', 'Functional selling points')],
+    ['coreFeaturesAndParams', t('核心功能与技术参数', 'Core features & technical specs')],
+    ['targetAudience', t('主要用户群体', 'Target audience')],
+    ['useScenarios', t('典型使用场景', 'Typical use scenarios')],
+    ['technicalSellingPoints', t('核心技术卖点', 'Technical selling points')],
+    ['verifiedPurchaseReasons', t('已验证购买理由', 'Verified purchase reasons')],
+    ['painPoints', t('明确痛点问题', 'Pain points')],
+    ['materialCraft', t('材质工艺', 'Materials & craftsmanship')],
+    ['competitorAdvantage', t('竞品对比优势', 'Competitive advantages')],
+  ];
 
   return (
     <div className="flex-1 overflow-auto p-4">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 max-w-[1800px] mx-auto">
-        {/* 左侧 */}
         <div className="space-y-4">
           <section className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
-            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">产品原始信息</h2>
+            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">{t('产品原始信息', 'Product information')}</h2>
             <div className="space-y-3">
               <div>
-                <label className="block text-xs text-slate-500 mb-1">原始标题</label>
-                <input value={originalTitle} onChange={(e) => setOriginalTitle(e.target.value)} placeholder="产品原始标题" className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800" />
+                <label className="block text-xs text-slate-500 mb-1">{t('原始标题', 'Original title')}</label>
+                <input value={originalTitle} onChange={(e) => setOriginalTitle(e.target.value)} placeholder={t('产品原始标题', 'Original product title')} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800" />
               </div>
               <div>
-                <label className="block text-xs text-slate-500 mb-1">原始卖点</label>
-                <textarea value={originalBullets} onChange={(e) => setOriginalBullets(e.target.value)} placeholder="卖点1&#10;卖点2" rows={3} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 resize-y" />
+                <label className="block text-xs text-slate-500 mb-1">{t('原始卖点', 'Original bullet points')}</label>
+                <textarea value={originalBullets} onChange={(e) => setOriginalBullets(e.target.value)} placeholder={t('卖点1\n卖点2', 'Bullet 1\nBullet 2')} rows={3} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 resize-y" />
               </div>
               <div>
-                <label className="block text-xs text-slate-500 mb-1">产品描述（用途/规格/人群）</label>
-                <textarea value={originalDesc} onChange={(e) => setOriginalDesc(e.target.value)} placeholder="用途、场景、规格、人群..." rows={4} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 resize-y" />
+                <label className="block text-xs text-slate-500 mb-1">{t('产品描述（用途/规格/人群）', 'Description (use / specs / audience)')}</label>
+                <textarea value={originalDesc} onChange={(e) => setOriginalDesc(e.target.value)} placeholder={t('用途、场景、规格、人群...', 'Use case, scenario, specs, audience…')} rows={4} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 resize-y" />
               </div>
             </div>
           </section>
 
           <section className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">提示词配置</h2>
+              <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">{t('提示词配置', 'Prompt settings')}</h2>
               <div className="flex gap-2">
                 <button type="button" onClick={restoreDefaults} className="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800">
-                  恢复默认
+                  {t('恢复默认', 'Restore defaults')}
                 </button>
                 <button type="button" onClick={clearResults} className="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-1">
-                  <Trash2 className="w-3 h-3" /> 清空结果
+                  <Trash2 className="w-3 h-3" /> {t('清空结果', 'Clear results')}
                 </button>
               </div>
             </div>
             <div className="space-y-3">
               <div>
-                <label className="block text-xs text-slate-500 mb-1">标题生成提示词</label>
+                <label className="block text-xs text-slate-500 mb-1">{t('标题生成提示词', 'Title prompt')}</label>
                 <textarea value={titlePrompt} onChange={(e) => setTitlePrompt(e.target.value)} rows={2} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 resize-y" />
               </div>
               <div>
-                <label className="block text-xs text-slate-500 mb-1">卖点生成提示词</label>
+                <label className="block text-xs text-slate-500 mb-1">{t('卖点生成提示词', 'Bullet points prompt')}</label>
                 <textarea value={bulletPrompt} onChange={(e) => setBulletPrompt(e.target.value)} rows={2} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 resize-y" />
               </div>
               <div>
-                <label className="block text-xs text-slate-500 mb-1">描述生成提示词</label>
+                <label className="block text-xs text-slate-500 mb-1">{t('描述生成提示词', 'Description prompt')}</label>
                 <textarea value={descPrompt} onChange={(e) => setDescPrompt(e.target.value)} rows={2} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 resize-y" />
               </div>
             </div>
@@ -230,29 +249,27 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
 
           <div className="flex flex-wrap gap-2">
             <select value={platform} onChange={(e) => setPlatform(e.target.value)} className="px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800">
-              <option value="amazon">亚马逊</option>
-              <option value="douyin">抖音/国内</option>
-              <option value="shopify">独立站/Shopify</option>
+              <option value="amazon">{t('亚马逊', 'Amazon')}</option>
+              <option value="douyin">{t('抖音/国内', 'Douyin / domestic')}</option>
+              <option value="shopify">{t('独立站/Shopify', 'Shopify / standalone')}</option>
             </select>
             <select value={language} onChange={(e) => setLanguage(e.target.value)} className="px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800">
               <option value="en">English</option>
-              <option value="zh">中文</option>
+              <option value="zh">{t('中文', 'Chinese')}</option>
             </select>
             <button type="button" onClick={runParse} disabled={loading} className="px-4 py-2 text-sm rounded bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 disabled:opacity-50 flex items-center gap-2">
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              AI 解析产品特征
+              {t('AI 解析产品特征', 'AI parse product traits')}
             </button>
             <button type="button" onClick={runGenerate} disabled={loading} className="px-4 py-2 text-sm rounded bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-50 flex items-center gap-2">
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              生成标题 / 卖点 / 详情
+              {t('生成标题 / 卖点 / 详情', 'Generate title / bullets / description')}
             </button>
           </div>
           {error && <p className="text-sm text-red-500">{error}</p>}
         </div>
 
-        {/* 中间 + 右侧 */}
         <div className="lg:col-span-2 space-y-4">
-          {/* 历史记录 */}
           <section className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
             <button
               type="button"
@@ -261,18 +278,18 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
             >
               <span className="flex items-center gap-2">
                 <Clock className="w-4 h-4" />
-                历史记录（{history.length}）
+                {t('历史记录', 'History')}（{history.length}）
               </span>
               {showHistory ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </button>
             {showHistory && (
               <div className="px-4 pb-4">
                 {history.length === 0 ? (
-                  <p className="text-sm text-slate-400 py-4 text-center">暂无生成记录</p>
+                  <p className="text-sm text-slate-400 py-4 text-center">{t('暂无生成记录', 'No generations yet')}</p>
                 ) : (
                   <>
                     <div className="flex justify-end mb-2">
-                      <button type="button" onClick={clearHistory} className="text-xs text-red-500 hover:underline">清空全部历史</button>
+                      <button type="button" onClick={clearHistory} className="text-xs text-red-500 hover:underline">{t('清空全部历史', 'Clear all history')}</button>
                     </div>
                     <div className="space-y-2 max-h-60 overflow-y-auto scrollbar-thin">
                       {history.map((item) => (
@@ -281,9 +298,9 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
                             <div className="flex items-center gap-2 mb-1">
                               <span className="text-xs text-slate-400">{item.time}</span>
                               <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">{platformLabel(item.platform)}</span>
-                              <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">{item.language === 'zh' ? '中文' : 'EN'}</span>
+                              <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">{item.language === 'zh' ? t('中文', 'Chinese') : 'EN'}</span>
                             </div>
-                            <p className="text-sm text-slate-700 dark:text-slate-300 truncate">{item.title || item.input || '(无标题)'}</p>
+                            <p className="text-sm text-slate-700 dark:text-slate-300 truncate">{item.title || item.input || t('(无标题)', '(No title)')}</p>
                           </div>
                           <button type="button" onClick={() => removeHistory(item.id)} className="shrink-0 p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/20 text-slate-400 hover:text-red-500">
                             <X className="w-3.5 h-3.5" />
@@ -297,20 +314,19 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
             )}
           </section>
 
-          {/* 生成结果 */}
           <section className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
-            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">生成结果</h2>
+            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">{t('生成结果', 'Generated copy')}</h2>
             <div className="space-y-3">
               <div>
-                <label className="block text-xs text-slate-500 mb-1">优化标题</label>
-                <input value={optimizedTitle} onChange={(e) => setOptimizedTitle(e.target.value)} placeholder="生成后将显示于此" className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800" />
+                <label className="block text-xs text-slate-500 mb-1">{t('优化标题', 'Optimized title')}</label>
+                <input value={optimizedTitle} onChange={(e) => setOptimizedTitle(e.target.value)} placeholder={t('生成后将显示于此', 'Output appears here after generation')} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800" />
               </div>
               <div>
-                <label className="block text-xs text-slate-500 mb-1">产品卖点 (Bullet Points)</label>
+                <label className="block text-xs text-slate-500 mb-1">{t('产品卖点 (Bullet Points)', 'Bullet points')}</label>
                 <textarea value={optimizedBullets} onChange={(e) => setOptimizedBullets(e.target.value)} rows={5} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 resize-y" />
               </div>
               <div>
-                <label className="block text-xs text-slate-500 mb-1">详情描述</label>
+                <label className="block text-xs text-slate-500 mb-1">{t('详情描述', 'Product description')}</label>
                 <textarea value={optimizedDesc} onChange={(e) => setOptimizedDesc(e.target.value)} rows={6} className="w-full px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 resize-y" />
               </div>
             </div>
@@ -319,7 +335,10 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
                 type="button"
                 className="text-sm px-3 py-1.5 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2"
                 onClick={() => {
-                  const text = `Title:\n${optimizedTitle}\n\nBullet Points:\n${optimizedBullets}\n\nDescription:\n${optimizedDesc}`;
+                  const titleLabel = t('标题', 'Title');
+                  const bulletsLabel = t('卖点', 'Bullet Points');
+                  const descLabel = t('描述', 'Description');
+                  const text = `${titleLabel}:\n${optimizedTitle}\n\n${bulletsLabel}:\n${optimizedBullets}\n\n${descLabel}:\n${optimizedDesc}`;
                   const blob = new Blob([text], { type: 'text/plain' });
                   const a = document.createElement('a');
                   a.href = URL.createObjectURL(blob);
@@ -328,27 +347,15 @@ export function TextWorkflow({ apiKey, provider, textModel }: TextWorkflowProps)
                   URL.revokeObjectURL(a.href);
                 }}
               >
-                <Save className="w-4 h-4" /> 保存到文件
+                <Save className="w-4 h-4" /> {t('保存到文件', 'Save to file')}
               </button>
             </div>
           </section>
 
-          {/* 产品画像 */}
           <section className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
-            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">AI 解析 - 产品画像</h2>
+            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">{t('AI 解析 - 产品画像', 'AI parse — product profile')}</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {[
-                ['productTitle', '产品标题'],
-                ['functionalSellingPoints', '功能卖点'],
-                ['coreFeaturesAndParams', '核心功能与技术参数'],
-                ['targetAudience', '主要用户群体'],
-                ['useScenarios', '典型使用场景'],
-                ['technicalSellingPoints', '核心技术卖点'],
-                ['verifiedPurchaseReasons', '已验证购买理由'],
-                ['painPoints', '明确痛点问题'],
-                ['materialCraft', '材质工艺'],
-                ['competitorAdvantage', '竞品对比优势'],
-              ].map(([key, label]) => (
+              {parsedFieldRows.map(([key, label]) => (
                 <div key={key}>
                   <label className="block text-xs text-slate-500 mb-1">{label}</label>
                   <textarea
