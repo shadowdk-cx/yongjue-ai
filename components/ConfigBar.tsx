@@ -35,6 +35,7 @@ const OPENAI_IMAGE_MODELS = [
 ];
 
 const OPENROUTER_IMAGE_MODELS = [
+  { value: 'google/gemini-3.1-flash-image', label: 'Banana 2（OpenRouter）' },
   { value: 'google/gemini-3.1-flash-image', label: 'Nano Banana 2（OpenRouter）' },
   { value: 'google/gemini-2.5-flash-image', label: 'Nano Banana（OpenRouter）' },
   { value: 'google/gemini-3-pro-image', label: 'Nano Banana Pro（OpenRouter）' },
@@ -51,6 +52,8 @@ const DETALER_TEXT_MODELS = [
 ];
 
 const DETALER_IMAGE_MODELS = [
+  { value: 'nano-banana-2.0-exp', label: 'Nano Banana 2.0（Detaler 实验）' },
+  { value: 'chatgpt-image-2.0', label: 'ChatGPT Image 2.0（Detaler）' },
   { value: 'gpt-image-1', label: 'gpt-image-1 (Detaler)' },
   { value: 'gpt-image-1.5', label: 'gpt-image-1.5 (Detaler)' },
 ];

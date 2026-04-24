@@ -1,10 +1,11 @@
 import dynamic from 'next/dynamic';
+import HomeFull from '@/components/HomeFull';
 
 /**
  * 生产环境 next start 下整页 SSR 偶发白屏：主界面仅在浏览器挂载（ssr:false），
  * 服务端只输出下方 loading，避免大体积 Client 组件在服务端渲染阶段异常。
  */
-const HomeFull = dynamic(() => import('@/components/HomeFull'), {
+const HomeFullCSR = dynamic(() => import('@/components/HomeFull'), {
   ssr: false,
   loading: () => (
     <div className="min-h-screen flex flex-col items-center justify-center gap-3 bg-slate-50 text-slate-600 px-6">
@@ -18,5 +19,7 @@ const HomeFull = dynamic(() => import('@/components/HomeFull'), {
 });
 
 export default function Page() {
-  return <HomeFull />;
+  // 开发环境优先 SSR，避免本地偶发脚本加载失败时长期停留在 Loading 占位页。
+  if (process.env.NODE_ENV !== 'production') return <HomeFull />;
+  return <HomeFullCSR />;
 }

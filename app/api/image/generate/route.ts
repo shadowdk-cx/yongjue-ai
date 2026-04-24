@@ -17,6 +17,17 @@ const SIZE_MAP: Record<string, '1024x1024' | '1792x1024' | '1024x1792'> = {
   '1024x1792': '1024x1792',
 };
 const DETALER_SUPPORTED_IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5']);
+const DETALER_MODEL_ALIASES: Record<string, string> = {
+  'chatgpt-image-2.0': 'gpt-image-1.5',
+};
+const DETALER_EXPERIMENTAL_MODEL_CANDIDATES: Record<string, string[]> = {
+  'nano-banana-2.0-exp': ['gemini-3.1-flash-image-preview', 'gemini-3.1-flash-image', 'gpt-image-1.5'],
+};
+
+function normalizeDetalerModel(model?: string) {
+  const raw = (model || 'gpt-image-1').trim();
+  return DETALER_MODEL_ALIASES[raw] || raw;
+}
 
 function parseImageDataUrl(dataUrl: string): { mimeType: string; buffer: Buffer } {
   const m = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
@@ -66,6 +77,36 @@ async function generateDetalerImageUrl(args: {
   const url = data?.url as string | undefined;
   if (!url) throw new Error('Detaler 未返回图片');
   return url;
+}
+
+async function generateDetalerImageWithFallback(args: {
+  apiKey: string;
+  modelCandidates: string[];
+  prompt: string;
+  size: string;
+  refImages?: string[];
+}) {
+  let lastErr: unknown;
+  const shouldTryNextModel = (msg: string) =>
+    /not supported model|unsupported|unknown model|invalid model|无可用渠道|no available channel|distributor|HTTP 503|\\b503\\b/i.test(
+      msg
+    );
+  for (const candidate of args.modelCandidates) {
+    try {
+      return await generateDetalerImageUrl({
+        apiKey: args.apiKey,
+        model: candidate,
+        prompt: args.prompt,
+        size: args.size,
+        refImages: args.refImages,
+      });
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!shouldTryNextModel(msg)) throw e;
+    }
+  }
+  throw (lastErr instanceof Error ? lastErr : new Error(String(lastErr || 'Detaler 生图失败')));
 }
 
 export async function POST(req: NextRequest) {
@@ -178,18 +219,28 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ url });
     }
     if (provider === 'detaler') {
-      const selectedModel = (model || 'gpt-image-1').trim();
-      if (!DETALER_SUPPORTED_IMAGE_MODELS.has(selectedModel)) {
+      const rawModel = (model || 'gpt-image-1').trim();
+      const selectedModel = normalizeDetalerModel(rawModel);
+      const isExperimental = Object.prototype.hasOwnProperty.call(DETALER_EXPERIMENTAL_MODEL_CANDIDATES, rawModel);
+      if (!isExperimental && !DETALER_SUPPORTED_IMAGE_MODELS.has(selectedModel)) {
         return NextResponse.json(
-          { error: `Detaler 当前仅支持以下生图模型：gpt-image-1, gpt-image-1.5。你当前选择的是：${selectedModel}` },
+          { error: `Detaler 当前仅支持以下生图模型：Nano Banana 2.0（实验）、ChatGPT Image 2.0、gpt-image-1、gpt-image-1.5。你当前选择的是：${model || selectedModel}` },
           { status: 400 }
         );
       }
+      const modelCandidates = isExperimental
+        ? (
+            // 垫图场景优先可编辑模型，避免实验 Gemini 通道在 edit 接口长时间挂起。
+            refImages && refImages.length > 0
+              ? ['gpt-image-1.5', 'gpt-image-1']
+              : DETALER_EXPERIMENTAL_MODEL_CANDIDATES[rawModel]
+          )
+        : [selectedModel];
       if (asyncMode) {
         const jobId = createImageJob(() =>
-          generateDetalerImageUrl({
+          generateDetalerImageWithFallback({
             apiKey: apiKey.trim(),
-            model: selectedModel,
+            modelCandidates,
             prompt: prompt.trim(),
             size,
             refImages,
@@ -198,9 +249,9 @@ export async function POST(req: NextRequest) {
         );
         return NextResponse.json({ jobId, status: 'pending' });
       }
-      const url = await generateDetalerImageUrl({
+      const url = await generateDetalerImageWithFallback({
         apiKey: apiKey.trim(),
-        model: selectedModel,
+        modelCandidates,
         prompt: prompt.trim(),
         size,
         refImages,
