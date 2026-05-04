@@ -3,6 +3,10 @@
 @tailwind utilities;
 
 :root {
+  /* Tailwind theme matches tailwind.config.ts fontFamily (Geist 变量若未注入则用系统栈) */
+  --font-geist-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+  --font-geist-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, monospace;
   --foreground: #0f172a;
   --background: #f8fafc;
   --card: #ffffff;
