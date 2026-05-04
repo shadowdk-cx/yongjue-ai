@@ -20,8 +20,9 @@ const DETALER_SUPPORTED_IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5'])
 const DETALER_MODEL_ALIASES: Record<string, string> = {
   'chatgpt-image-2.0': 'gpt-image-1.5',
 };
+/** 文生图实验：优先稳定快速的 OpenAI 图像模型，再尝试 Gemini 通道（后者易排队/503） */
 const DETALER_EXPERIMENTAL_MODEL_CANDIDATES: Record<string, string[]> = {
-  'nano-banana-2.0-exp': ['gemini-3.1-flash-image-preview', 'gemini-3.1-flash-image', 'gpt-image-1.5'],
+  'nano-banana-2.0-exp': ['gpt-image-1.5', 'gemini-3.1-flash-image-preview', 'gemini-3.1-flash-image', 'gpt-image-1'],
 };
 
 function normalizeDetalerModel(model?: string) {
@@ -79,6 +80,18 @@ async function generateDetalerImageUrl(args: {
   return url;
 }
 
+/** 单个上游模型最长等待；超时则换下一个候选，避免 Gemini 实验通道挂起拖慢整单 */
+const DETALER_PER_MODEL_MS = 70_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} 上游超时（${Math.round(ms / 1000)}s），切换备选模型`)), ms);
+    }),
+  ]);
+}
+
 async function generateDetalerImageWithFallback(args: {
   apiKey: string;
   modelCandidates: string[];
@@ -88,18 +101,22 @@ async function generateDetalerImageWithFallback(args: {
 }) {
   let lastErr: unknown;
   const shouldTryNextModel = (msg: string) =>
-    /not supported model|unsupported|unknown model|invalid model|无可用渠道|no available channel|distributor|HTTP 503|\\b503\\b/i.test(
+    /not supported model|unsupported|unknown model|invalid model|无可用渠道|no available channel|distributor|HTTP 503|\\b503\\b|超时|timeout|ETIMEDOUT|ECONNRESET|上游超时|切换备选/i.test(
       msg
     );
   for (const candidate of args.modelCandidates) {
     try {
-      return await generateDetalerImageUrl({
-        apiKey: args.apiKey,
-        model: candidate,
-        prompt: args.prompt,
-        size: args.size,
-        refImages: args.refImages,
-      });
+      return await withTimeout(
+        generateDetalerImageUrl({
+          apiKey: args.apiKey,
+          model: candidate,
+          prompt: args.prompt,
+          size: args.size,
+          refImages: args.refImages,
+        }),
+        DETALER_PER_MODEL_MS,
+        candidate
+      );
     } catch (e) {
       lastErr = e;
       const msg = e instanceof Error ? e.message : String(e);
@@ -237,6 +254,10 @@ export async function POST(req: NextRequest) {
           )
         : [selectedModel];
       if (asyncMode) {
+        const jobTimeoutMs = Math.min(
+          300_000,
+          30_000 + DETALER_PER_MODEL_MS * Math.max(1, modelCandidates.length)
+        );
         const jobId = createImageJob(() =>
           generateDetalerImageWithFallback({
             apiKey: apiKey.trim(),
@@ -245,7 +266,10 @@ export async function POST(req: NextRequest) {
             size,
             refImages,
           }),
-          { timeoutMs: 180_000, timeoutMessage: 'Detaler 生成超时（3 分钟），请重试或切换 gpt-image-1.5' }
+          {
+            timeoutMs: jobTimeoutMs,
+            timeoutMessage: 'Detaler 生成超时，请重试或改用 gpt-image-1.5',
+          }
         );
         return NextResponse.json({ jobId, status: 'pending' });
       }

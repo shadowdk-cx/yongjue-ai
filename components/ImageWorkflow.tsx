@@ -153,7 +153,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
   ): Promise<string> => {
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const pollDetalerJob = async (jobId: string): Promise<string> => {
-      const deadline = Date.now() + 3 * 60 * 1000;
+      // 与后端 Detaler 多候选任务最长约 4～5 分钟一致；轮询 800ms 减少“已出图但界面晚一步”的体感延迟
+      const deadline = Date.now() + 5 * 60 * 1000;
+      let n = 0;
       while (Date.now() < deadline) {
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
         const res = await fetch(`/api/image/job/${encodeURIComponent(jobId)}`, { signal });
@@ -166,7 +168,8 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
           return url;
         }
         if (status === 'failed') throw new Error(String(data.error || t('生图失败', 'Image generation failed')));
-        await sleep(2000);
+        n += 1;
+        await sleep(n <= 8 ? 500 : 1000);
       }
       throw new Error(t('生成超时，请稍后重试', 'Generation timeout, please retry'));
     };
