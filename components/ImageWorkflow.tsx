@@ -153,8 +153,8 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
   ): Promise<string> => {
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const pollDetalerJob = async (jobId: string): Promise<string> => {
-      // 与后端 Detaler 多候选任务最长约 4～5 分钟一致；轮询 800ms 减少“已出图但界面晚一步”的体感延迟
-      const deadline = Date.now() + 5 * 60 * 1000;
+      // 与后端 Detaler 一致：实验 Gemini 图像单次最长约 290s + 任务余量，前端略长于服务端避免误判超时
+      const deadline = Date.now() + 7 * 60 * 1000;
       let n = 0;
       while (Date.now() < deadline) {
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');

@@ -22,14 +22,30 @@ const DETALER_MODEL_ALIASES: Record<string, string> = {
 };
 /** 界面「实验」选项对应 Detaler 上游单一模型 ID（不做自动切换） */
 const DETALER_EXPERIMENTAL_UPSTREAM: Record<string, string> = {
+  /** Detaler 文档常见写法；若仍排队严重可尝试不含 -preview 的 gemini-3.1-flash-image */
   'nano-banana-2.0-exp': 'gemini-3.1-flash-image-preview',
 };
 
-const DETALER_SINGLE_CALL_MS = 180_000;
+/** 普通 gpt-image 较快；Gemini 图像经 Detaler 转发时常排队，180s 易被误判为「生成不了」 */
+const DETALER_CALL_MS_DEFAULT = 180_000;
+/** 尽量贴近 `maxDuration`，留几秒余量给序列化与落盘 */
+const DETALER_CALL_MS_EXPERIMENTAL_GEMINI = 290_000;
 
-function appendDetalerManualHint(message: string): string {
+function appendDetalerManualHint(message: string, rawUiModel?: string): string {
   if (/手动切换|未自动更换模型/i.test(message)) return message;
-  return `${message}\n\n提示：当前不会自动更换模型。若失败，请在「生图模型」中手动切换到 gpt-image-1 / gpt-image-1.5（或 ChatGPT Image 2.0）；垫图若不被当前模型支持，也需更换模型或先移除垫图再试。`;
+  let extra = '';
+  const raw = rawUiModel?.trim() || '';
+  if (raw === 'nano-banana-2.0-exp' || /超时|timeout/i.test(message)) {
+    extra =
+      '\n\n说明：Nano Banana 2 走 Detaler→Gemini 图像通道时容易排队，单次可能要几分钟；若多次超过上限仍失败，请在顶部服务商改用「Gemini」选 Nano Banana 2，或改用「OpenRouter」选 Banana 2（同一套效果通常更稳定）。';
+  }
+  return `${message}\n\n提示：当前不会自动更换模型。若失败，请在「生图模型」中手动切换到 gpt-image-1 / gpt-image-1.5（或 ChatGPT Image 2.0）；垫图若不被当前模型支持，也需更换模型或先移除垫图再试。${extra}`;
+}
+
+function detalerCallTimeoutMs(rawUiModel: string): number {
+  return Object.prototype.hasOwnProperty.call(DETALER_EXPERIMENTAL_UPSTREAM, rawUiModel.trim())
+    ? DETALER_CALL_MS_EXPERIMENTAL_GEMINI
+    : DETALER_CALL_MS_DEFAULT;
 }
 
 function resolveDetalerUpstreamModel(rawModel: string): string {
@@ -106,10 +122,12 @@ async function generateDetalerImageUrl(args: {
 async function runDetalerGeneration(args: {
   apiKey: string;
   upstreamModel: string;
+  rawUiModel: string;
   prompt: string;
   size: string;
   refImages?: string[];
 }): Promise<string> {
+  const ms = detalerCallTimeoutMs(args.rawUiModel);
   return withTimeout(
     generateDetalerImageUrl({
       apiKey: args.apiKey,
@@ -118,7 +136,7 @@ async function runDetalerGeneration(args: {
       size: args.size,
       refImages: args.refImages,
     }),
-    DETALER_SINGLE_CALL_MS
+    ms
   );
 }
 
@@ -177,18 +195,21 @@ export async function POST(req: NextRequest) {
         const imageModel = model || 'gemini-2.5-flash-image';
         dataUrl = await generateImageGemini(ai, imageModel, composed, src);
       } else {
+        const rawRefine = (model || 'gpt-image-1').trim();
         try {
           const client = createDetaler(apiKey);
           const parsed = parseImageDataUrl(src);
           const file = await toFile(parsed.buffer, 'refine.png', { type: parsed.mimeType });
-          const rawRefine = (model || 'gpt-image-1').trim();
           const imageModel = resolveDetalerUpstreamModel(rawRefine);
-          const edited = await client.images.edit({
-            model: imageModel,
-            image: file as any,
-            prompt: composed,
-            size: SIZE_MAP[size] || '1024x1024',
-          } as any);
+          const edited = await withTimeout(
+            client.images.edit({
+              model: imageModel,
+              image: file as any,
+              prompt: composed,
+              size: SIZE_MAP[size] || '1024x1024',
+            } as any),
+            detalerCallTimeoutMs(rawRefine)
+          );
           const d = (edited as any)?.data?.[0];
           if (typeof d?.b64_json === 'string' && d.b64_json) {
             dataUrl = `data:image/png;base64,${d.b64_json}`;
@@ -199,7 +220,7 @@ export async function POST(req: NextRequest) {
           }
         } catch (err) {
           const base = err instanceof Error ? err.message : String(err);
-          throw new Error(appendDetalerManualHint(base));
+          throw new Error(appendDetalerManualHint(base, rawRefine));
         }
       }
       const url = persistDataUrlAsPublicUrl(dataUrl);
@@ -253,19 +274,21 @@ export async function POST(req: NextRequest) {
           return await runDetalerGeneration({
             apiKey: apiKey.trim(),
             upstreamModel,
+            rawUiModel: rawModel,
             prompt: prompt.trim(),
             size,
             refImages,
           });
         } catch (err) {
           const base = err instanceof Error ? err.message : String(err);
-          throw new Error(appendDetalerManualHint(base));
+          throw new Error(appendDetalerManualHint(base, rawModel));
         }
       };
       if (asyncMode) {
+        const jobMs = detalerCallTimeoutMs(rawModel);
         const jobId = createImageJob(worker, {
-          timeoutMs: DETALER_SINGLE_CALL_MS + 15_000,
-          timeoutMessage: appendDetalerManualHint('Detaler 生成超时'),
+          timeoutMs: jobMs + 25_000,
+          timeoutMessage: appendDetalerManualHint('Detaler 生成超时', rawModel),
         });
         return NextResponse.json({ jobId, status: 'pending' });
       }
