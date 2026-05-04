@@ -20,10 +20,33 @@ const DETALER_SUPPORTED_IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5'])
 const DETALER_MODEL_ALIASES: Record<string, string> = {
   'chatgpt-image-2.0': 'gpt-image-1.5',
 };
-/** 文生图实验：优先稳定快速的 OpenAI 图像模型，再尝试 Gemini 通道（后者易排队/503） */
-const DETALER_EXPERIMENTAL_MODEL_CANDIDATES: Record<string, string[]> = {
-  'nano-banana-2.0-exp': ['gpt-image-1.5', 'gemini-3.1-flash-image-preview', 'gemini-3.1-flash-image', 'gpt-image-1'],
+/** 界面「实验」选项对应 Detaler 上游单一模型 ID（不做自动切换） */
+const DETALER_EXPERIMENTAL_UPSTREAM: Record<string, string> = {
+  'nano-banana-2.0-exp': 'gemini-3.1-flash-image-preview',
 };
+
+const DETALER_SINGLE_CALL_MS = 180_000;
+
+function appendDetalerManualHint(message: string): string {
+  if (/手动切换|未自动更换模型/i.test(message)) return message;
+  return `${message}\n\n提示：当前不会自动更换模型。若失败，请在「生图模型」中手动切换到 gpt-image-1 / gpt-image-1.5（或 ChatGPT Image 2.0）；垫图若不被当前模型支持，也需更换模型或先移除垫图再试。`;
+}
+
+function resolveDetalerUpstreamModel(rawModel: string): string {
+  if (Object.prototype.hasOwnProperty.call(DETALER_EXPERIMENTAL_UPSTREAM, rawModel)) {
+    return DETALER_EXPERIMENTAL_UPSTREAM[rawModel];
+  }
+  return normalizeDetalerModel(rawModel);
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(`Detaler 请求超时（${Math.round(ms / 1000)}s）`)), ms);
+    }),
+  ]);
+}
 
 function normalizeDetalerModel(model?: string) {
   const raw = (model || 'gpt-image-1').trim();
@@ -80,50 +103,23 @@ async function generateDetalerImageUrl(args: {
   return url;
 }
 
-/** 单个上游模型最长等待；超时则换下一个候选，避免 Gemini 实验通道挂起拖慢整单 */
-const DETALER_PER_MODEL_MS = 70_000;
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => {
-      setTimeout(() => reject(new Error(`${label} 上游超时（${Math.round(ms / 1000)}s），切换备选模型`)), ms);
-    }),
-  ]);
-}
-
-async function generateDetalerImageWithFallback(args: {
+async function runDetalerGeneration(args: {
   apiKey: string;
-  modelCandidates: string[];
+  upstreamModel: string;
   prompt: string;
   size: string;
   refImages?: string[];
-}) {
-  let lastErr: unknown;
-  const shouldTryNextModel = (msg: string) =>
-    /not supported model|unsupported|unknown model|invalid model|无可用渠道|no available channel|distributor|HTTP 503|\\b503\\b|超时|timeout|ETIMEDOUT|ECONNRESET|上游超时|切换备选/i.test(
-      msg
-    );
-  for (const candidate of args.modelCandidates) {
-    try {
-      return await withTimeout(
-        generateDetalerImageUrl({
-          apiKey: args.apiKey,
-          model: candidate,
-          prompt: args.prompt,
-          size: args.size,
-          refImages: args.refImages,
-        }),
-        DETALER_PER_MODEL_MS,
-        candidate
-      );
-    } catch (e) {
-      lastErr = e;
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!shouldTryNextModel(msg)) throw e;
-    }
-  }
-  throw (lastErr instanceof Error ? lastErr : new Error(String(lastErr || 'Detaler 生图失败')));
+}): Promise<string> {
+  return withTimeout(
+    generateDetalerImageUrl({
+      apiKey: args.apiKey,
+      model: args.upstreamModel,
+      prompt: args.prompt,
+      size: args.size,
+      refImages: args.refImages,
+    }),
+    DETALER_SINGLE_CALL_MS
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -181,23 +177,29 @@ export async function POST(req: NextRequest) {
         const imageModel = model || 'gemini-2.5-flash-image';
         dataUrl = await generateImageGemini(ai, imageModel, composed, src);
       } else {
-        const client = createDetaler(apiKey);
-        const parsed = parseImageDataUrl(src);
-        const file = await toFile(parsed.buffer, 'refine.png', { type: parsed.mimeType });
-        const imageModel = model || 'gpt-image-1';
-        const edited = await client.images.edit({
-          model: imageModel,
-          image: file as any,
-          prompt: composed,
-          size: SIZE_MAP[size] || '1024x1024',
-        } as any);
-        const d = (edited as any)?.data?.[0];
-        if (typeof d?.b64_json === 'string' && d.b64_json) {
-          dataUrl = `data:image/png;base64,${d.b64_json}`;
-        } else if (typeof d?.url === 'string' && d.url) {
-          return NextResponse.json({ url: d.url });
-        } else {
-          throw new Error('Detaler 精修未返回图片');
+        try {
+          const client = createDetaler(apiKey);
+          const parsed = parseImageDataUrl(src);
+          const file = await toFile(parsed.buffer, 'refine.png', { type: parsed.mimeType });
+          const rawRefine = (model || 'gpt-image-1').trim();
+          const imageModel = resolveDetalerUpstreamModel(rawRefine);
+          const edited = await client.images.edit({
+            model: imageModel,
+            image: file as any,
+            prompt: composed,
+            size: SIZE_MAP[size] || '1024x1024',
+          } as any);
+          const d = (edited as any)?.data?.[0];
+          if (typeof d?.b64_json === 'string' && d.b64_json) {
+            dataUrl = `data:image/png;base64,${d.b64_json}`;
+          } else if (typeof d?.url === 'string' && d.url) {
+            return NextResponse.json({ url: d.url });
+          } else {
+            throw new Error('Detaler 精修未返回图片');
+          }
+        } catch (err) {
+          const base = err instanceof Error ? err.message : String(err);
+          throw new Error(appendDetalerManualHint(base));
         }
       }
       const url = persistDataUrlAsPublicUrl(dataUrl);
@@ -238,48 +240,36 @@ export async function POST(req: NextRequest) {
     if (provider === 'detaler') {
       const rawModel = (model || 'gpt-image-1').trim();
       const selectedModel = normalizeDetalerModel(rawModel);
-      const isExperimental = Object.prototype.hasOwnProperty.call(DETALER_EXPERIMENTAL_MODEL_CANDIDATES, rawModel);
+      const isExperimental = Object.prototype.hasOwnProperty.call(DETALER_EXPERIMENTAL_UPSTREAM, rawModel);
       if (!isExperimental && !DETALER_SUPPORTED_IMAGE_MODELS.has(selectedModel)) {
         return NextResponse.json(
           { error: `Detaler 当前仅支持以下生图模型：Nano Banana 2.0（实验）、ChatGPT Image 2.0、gpt-image-1、gpt-image-1.5。你当前选择的是：${model || selectedModel}` },
           { status: 400 }
         );
       }
-      const modelCandidates = isExperimental
-        ? (
-            // 垫图场景优先可编辑模型，避免实验 Gemini 通道在 edit 接口长时间挂起。
-            refImages && refImages.length > 0
-              ? ['gpt-image-1.5', 'gpt-image-1']
-              : DETALER_EXPERIMENTAL_MODEL_CANDIDATES[rawModel]
-          )
-        : [selectedModel];
-      if (asyncMode) {
-        const jobTimeoutMs = Math.min(
-          300_000,
-          30_000 + DETALER_PER_MODEL_MS * Math.max(1, modelCandidates.length)
-        );
-        const jobId = createImageJob(() =>
-          generateDetalerImageWithFallback({
+      const upstreamModel = resolveDetalerUpstreamModel(rawModel);
+      const worker = async () => {
+        try {
+          return await runDetalerGeneration({
             apiKey: apiKey.trim(),
-            modelCandidates,
+            upstreamModel,
             prompt: prompt.trim(),
             size,
             refImages,
-          }),
-          {
-            timeoutMs: jobTimeoutMs,
-            timeoutMessage: 'Detaler 生成超时，请重试或改用 gpt-image-1.5',
-          }
-        );
+          });
+        } catch (err) {
+          const base = err instanceof Error ? err.message : String(err);
+          throw new Error(appendDetalerManualHint(base));
+        }
+      };
+      if (asyncMode) {
+        const jobId = createImageJob(worker, {
+          timeoutMs: DETALER_SINGLE_CALL_MS + 15_000,
+          timeoutMessage: appendDetalerManualHint('Detaler 生成超时'),
+        });
         return NextResponse.json({ jobId, status: 'pending' });
       }
-      const url = await generateDetalerImageWithFallback({
-        apiKey: apiKey.trim(),
-        modelCandidates,
-        prompt: prompt.trim(),
-        size,
-        refImages,
-      });
+      const url = await worker();
       return NextResponse.json({ url });
     }
     const openai = createOpenAI(apiKey);

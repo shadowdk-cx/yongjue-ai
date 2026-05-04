@@ -52,7 +52,7 @@ const DETALER_TEXT_MODELS = [
 ];
 
 const DETALER_IMAGE_MODELS = [
-  { value: 'nano-banana-2.0-exp', label: 'Nano Banana 2.0（Detaler 实验）' },
+  { value: 'nano-banana-2.0-exp', label: 'Nano Banana 2.0（Detaler 实验，失败请手动换模型）' },
   { value: 'chatgpt-image-2.0', label: 'ChatGPT Image 2.0（Detaler）' },
   { value: 'gpt-image-1', label: 'gpt-image-1 (Detaler)' },
   { value: 'gpt-image-1.5', label: 'gpt-image-1.5 (Detaler)' },
