@@ -38,6 +38,15 @@ export function persistDataUrlAsPublicUrl(dataUrl: string): string {
     throw new Error('内部错误：仅支持 image/* 或 video/mp4 的 data URL');
   }
   const { buffer, mimeType, isVideo } = parsed;
+
+  // 生产环境（Zeabur 等无状态/多副本部署）下，落盘到 tmpdir 的文件在跨实例或冷启动后会丢，
+  // 导致 /api/artifact/xxx.png 访问 404、前端「图片打不开」。
+  // 图片体积可控，直接返回 data URL，让浏览器无依赖地直接渲染；视频较大，仍走落盘。
+  // 本地开发或显式设置 LOCAL_DISK_ARTIFACTS=1 时，保留旧的落盘行为，便于调试。
+  if (!isVideo && process.env.NODE_ENV === 'production' && process.env.LOCAL_DISK_ARTIFACTS !== '1') {
+    return dataUrl;
+  }
+
   const ext = MIME_TO_EXT[mimeType] || (isVideo ? 'mp4' : 'png');
   const name = `${randomUUID()}.${ext}`;
 
@@ -48,6 +57,8 @@ export function persistDataUrlAsPublicUrl(dataUrl: string): string {
     return `/api/artifact/${name}`;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // 写盘失败时也兜底成 data URL，至少图片能显示
+    if (!isVideo) return dataUrl;
     throw new Error(`保存生成文件失败：${msg}。请检查磁盘空间。`);
   }
 }
