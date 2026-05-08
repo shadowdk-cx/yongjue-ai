@@ -11,8 +11,13 @@ import { createImageJob } from '@/lib/image-jobs';
 
 export const maxDuration = 300;
 
-const SIZE_MAP: Record<string, '1024x1024' | '1792x1024' | '1024x1792'> = {
+type OpenAICompatibleSize = '1024x1024' | '1792x1024' | '1024x1792';
+
+const SIZE_MAP: Record<string, OpenAICompatibleSize> = {
   '1024x1024': '1024x1024',
+  '2048x2048': '1024x1024',
+  '1464x400': '1792x1024',
+  '600x450': '1024x1024',
   '1792x1024': '1792x1024',
   '1024x1792': '1024x1792',
 };

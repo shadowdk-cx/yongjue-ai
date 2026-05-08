@@ -1203,6 +1203,9 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
               className="px-3 py-2 text-sm rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
             >
               <option value="1024x1024">1024×1024</option>
+              <option value="2048x2048">2048×2048</option>
+              <option value="1464x400">1464×400</option>
+              <option value="600x450">600×450</option>
               <option value="1792x1024">1792×1024</option>
               <option value="1024x1792">1024×1792</option>
             </select>
