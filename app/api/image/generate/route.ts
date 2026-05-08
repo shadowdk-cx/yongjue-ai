@@ -31,16 +31,23 @@ const DETALER_EXPERIMENTAL_UPSTREAM: Record<string, string> = {
   'nano-banana-2.0-exp': 'gemini-3.1-flash-image-preview',
 };
 
-/** 普通 gpt-image 较快；Gemini 图像经 Detaler 转发时常排队，180s 易被误判为「生成不了」 */
-const DETALER_CALL_MS_DEFAULT = 180_000;
+/** Detaler 高峰期排队时间较长，给更宽容的等待窗口（用于非实验模型兜底） */
+const DETALER_CALL_MS_DEFAULT = 420_000;
 /** 尽量贴近 `maxDuration`，留几秒余量给序列化与落盘 */
 const DETALER_CALL_MS_EXPERIMENTAL_GEMINI = 290_000;
+const DETALER_CALL_MS_BY_MODEL: Record<string, number> = {
+  // 这几个模型在 Detaler 侧经常排队超过 5 分钟
+  'chatgpt-image-2.0': 480_000,
+  'gpt-image-1': 420_000,
+  'gpt-image-1.5': 420_000,
+};
+const DETALER_TIMEOUT_RETRY_ONCE_MODELS = new Set(['chatgpt-image-2.0', 'gpt-image-1', 'gpt-image-1.5']);
 
 function appendDetalerManualHint(message: string, rawUiModel?: string): string {
   if (/手动切换|未自动更换模型/i.test(message)) return message;
   let extra = '';
   const raw = rawUiModel?.trim() || '';
-  if (raw === 'nano-banana-2.0-exp' || /超时|timeout/i.test(message)) {
+  if (raw === 'nano-banana-2.0-exp') {
     extra =
       '\n\n说明：Nano Banana 2 走 Detaler→Gemini 图像通道时容易排队，单次可能要几分钟；若多次超过上限仍失败，请在顶部服务商改用「Gemini」选 Nano Banana 2，或改用「OpenRouter」选 Banana 2（同一套效果通常更稳定）。';
   }
@@ -48,9 +55,11 @@ function appendDetalerManualHint(message: string, rawUiModel?: string): string {
 }
 
 function detalerCallTimeoutMs(rawUiModel: string): number {
-  return Object.prototype.hasOwnProperty.call(DETALER_EXPERIMENTAL_UPSTREAM, rawUiModel.trim())
-    ? DETALER_CALL_MS_EXPERIMENTAL_GEMINI
-    : DETALER_CALL_MS_DEFAULT;
+  const raw = rawUiModel.trim();
+  if (Object.prototype.hasOwnProperty.call(DETALER_EXPERIMENTAL_UPSTREAM, raw)) {
+    return DETALER_CALL_MS_EXPERIMENTAL_GEMINI;
+  }
+  return DETALER_CALL_MS_BY_MODEL[raw] || DETALER_CALL_MS_DEFAULT;
 }
 
 function resolveDetalerUpstreamModel(rawModel: string): string {
@@ -133,16 +142,29 @@ async function runDetalerGeneration(args: {
   refImages?: string[];
 }): Promise<string> {
   const ms = detalerCallTimeoutMs(args.rawUiModel);
-  return withTimeout(
-    generateDetalerImageUrl({
-      apiKey: args.apiKey,
-      model: args.upstreamModel,
-      prompt: args.prompt,
-      size: args.size,
-      refImages: args.refImages,
-    }),
-    ms
-  );
+  const rawUiModel = args.rawUiModel.trim();
+  const doCall = () =>
+    withTimeout(
+      generateDetalerImageUrl({
+        apiKey: args.apiKey,
+        model: args.upstreamModel,
+        prompt: args.prompt,
+        size: args.size,
+        refImages: args.refImages,
+      }),
+      ms
+    );
+
+  try {
+    return await doCall();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTimeout = /请求超时|timeout/i.test(msg);
+    if (!isTimeout || !DETALER_TIMEOUT_RETRY_ONCE_MODELS.has(rawUiModel)) throw err;
+    // 轻微等待再重试一次，缓解瞬时拥堵/队列抖动
+    await new Promise((r) => setTimeout(r, 1500));
+    return await doCall();
+  }
 }
 
 export async function POST(req: NextRequest) {
