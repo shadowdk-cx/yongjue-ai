@@ -178,8 +178,14 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const providerName = String(payload.provider || '');
+        // 线上多实例环境下，内存 jobId 轮询可能命中不同实例导致「任务不存在或已过期」；
+        // 仅在本地开发环境启用 Detaler 异步任务轮询。
+        const isLocalHost =
+          typeof window !== 'undefined' &&
+          (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+        const useDetalerAsyncJob = providerName === 'detaler' && isLocalHost;
         const reqPayload =
-          providerName === 'detaler'
+          useDetalerAsyncJob
             ? { ...payload, asyncMode: true }
             : payload;
         const res = await fetch('/api/image/generate', {
@@ -190,7 +196,7 @@ export function ImageWorkflow({ apiKey, provider, textModel = 'gpt-4o', imageMod
         });
         const data = await readApiJson(res);
         if (!res.ok) throw new Error(String(data.error || t('生图失败', 'Image generation failed')));
-        if (providerName === 'detaler' && typeof data.jobId === 'string' && data.jobId) {
+        if (useDetalerAsyncJob && typeof data.jobId === 'string' && data.jobId) {
           return pollDetalerJob(data.jobId);
         }
         const url = pickImageUrl(data);
